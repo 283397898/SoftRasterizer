@@ -1,0 +1,52 @@
+# CMake
+build/
+build-dpcpp/
+out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.ipch
+*.aps
+*_i.c
+*_p.c
+*.ncb
+*.sdf
+*.opensdf
+*.db
+*.opendb
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Computed Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Editors
+.vscode/
+.idea/
+.cursor/
+.trae/
+.DS_Store
