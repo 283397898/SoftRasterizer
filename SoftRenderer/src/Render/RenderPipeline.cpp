@@ -43,7 +43,9 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
     rasterizer.SetFrameContext(pass.frame);
 
     GeometryProcessor geometryProcessor;
-    std::vector<Triangle> triangles;
+    std::vector<Triangle> itemTriangles;
+    std::vector<Triangle> opaqueMaskTriangles;
+    std::vector<Triangle> blendTriangles;
 
     using Clock = std::chrono::high_resolution_clock;
 
@@ -71,7 +73,7 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
             return a.mesh < b.mesh;
         });
 
-    // 遍历渲染队列中每一个绘制项
+    // 遍历渲染队列中每一个绘制项，先做几何阶段并按 alphaMode 分批
     for (const DrawItem& item : sortedItems) {
         if (!item.mesh || !item.material) {
             continue;
@@ -86,25 +88,42 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
             item.modelMatrix,
             item.normalMatrix,
             pass.frame,
-            triangles);
+            itemTriangles);
 
         stats.trianglesBuilt += geometryProcessor.GetLastTriangleCount();
 
         auto buildEnd = Clock::now();
         stats.buildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
 
-        // 2. 光栅化处理阶段：三角形裁剪和像素着色
-        if (!triangles.empty()) {
-            auto rastStart = Clock::now();
-            RasterStats rastStats = rasterizer.RasterizeTriangles(triangles);
-            auto rastEnd = Clock::now();
-            stats.rastMs += std::chrono::duration<double, std::milli>(rastEnd - rastStart).count();
-            stats.trianglesClipped += rastStats.trianglesClipped;
-            stats.trianglesRaster += rastStats.trianglesRaster;
-            stats.pixelsTested += rastStats.pixelsTested;
-            stats.pixelsShaded += rastStats.pixelsShaded;
+        if (itemTriangles.empty()) {
+            continue;
+        }
+
+        const int alphaMode = item.material ? item.material->alphaMode : 0;
+        if (alphaMode == 2) {
+            blendTriangles.insert(blendTriangles.end(), itemTriangles.begin(), itemTriangles.end());
+        } else {
+            opaqueMaskTriangles.insert(opaqueMaskTriangles.end(), itemTriangles.begin(), itemTriangles.end());
         }
     }
+
+    // 2. 光栅化处理阶段：按批次进行，避免每个 DrawItem 重复做 tile 预处理
+    auto rasterizeBatch = [&](const std::vector<Triangle>& batch) {
+        if (batch.empty()) {
+            return;
+        }
+        auto rastStart = Clock::now();
+        RasterStats rastStats = rasterizer.RasterizeTriangles(batch);
+        auto rastEnd = Clock::now();
+        stats.rastMs += std::chrono::duration<double, std::milli>(rastEnd - rastStart).count();
+        stats.trianglesClipped += rastStats.trianglesClipped;
+        stats.trianglesRaster += rastStats.trianglesRaster;
+        stats.pixelsTested += rastStats.pixelsTested;
+        stats.pixelsShaded += rastStats.pixelsShaded;
+    };
+
+    rasterizeBatch(opaqueMaskTriangles);
+    rasterizeBatch(blendTriangles);
 
     OutputDebugStringA("RenderPipeline Draw: end\n");
 

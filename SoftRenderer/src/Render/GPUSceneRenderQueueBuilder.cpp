@@ -10,12 +10,16 @@ namespace SR {
  * @param scene Runtime scene data
  * @param outQueue Output render queue
  */
-void GPUSceneRenderQueueBuilder::Build(const GPUScene& scene, RenderQueue& outQueue) const {
+void GPUSceneRenderQueueBuilder::Build(const GPUScene& scene, RenderQueue& outQueue, int onlyMaterialIndex) const {
     std::vector<DrawItem> items;
     const auto& sceneItems = scene.GetItems();
     items.reserve(sceneItems.size());
 
     for (const GPUSceneDrawItem& sceneItem : sceneItems) {
+        if (onlyMaterialIndex >= 0 && sceneItem.materialIndex != onlyMaterialIndex) {
+            continue;
+        }
+
         DrawItem item{};
         item.mesh = sceneItem.mesh;
         item.material = sceneItem.material;

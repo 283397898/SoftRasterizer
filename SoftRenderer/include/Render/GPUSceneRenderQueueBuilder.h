@@ -14,7 +14,7 @@ class GPUScene;
 class GPUSceneRenderQueueBuilder {
 public:
     /** @brief 从 GPUScene 提取信息并填充到渲染队列中 */
-    void Build(const GPUScene& scene, RenderQueue& outQueue) const;
+    void Build(const GPUScene& scene, RenderQueue& outQueue, int onlyMaterialIndex = -1) const;
 };
 
 } // namespace SR

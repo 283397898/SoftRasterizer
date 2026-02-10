@@ -6,6 +6,7 @@
 #include "Asset/GLTFTypes.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <vector>
 #include <cstdio>
@@ -146,6 +147,28 @@ struct RasterTriangle {
     double A01, B01, C01;
 };
 
+struct RasterScratchBuffers {
+    std::vector<RasterTriangle> rasterTris;
+    std::vector<int> tileMinXs;
+    std::vector<int> tileMinYs;
+    std::vector<int> tileMaxXs;
+    std::vector<int> tileMaxYs;
+    std::vector<size_t> binCounts;
+    std::vector<size_t> binOffsets;
+    std::vector<size_t> binWriteCursor;
+    std::vector<size_t> binTriIndices;
+    std::vector<int> triMinTileX;
+    std::vector<int> triMaxTileX;
+    std::vector<int> triMinTileY;
+    std::vector<int> triMaxTileY;
+    int cachedWidth = -1;
+    int cachedHeight = -1;
+    int cachedTilesX = -1;
+    int cachedTilesY = -1;
+};
+
+thread_local RasterScratchBuffers g_rasterScratch;
+
 /**
  * @brief 处理 UV 坐标的包裹模式 (重复、镜像、拉伸)
  */
@@ -181,7 +204,7 @@ double SampleBaseColorAlpha(const FrameContext& context, int imageIndex, int sam
     double u = WrapCoord(uv.x, wrapS);
     double v = WrapCoord(uv.y, wrapT);
     int x = static_cast<int>(std::floor(u * image.width));
-    int y = static_cast<int>(std::floor((1.0 - v) * image.height));
+    int y = static_cast<int>(std::floor(v * image.height));
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= image.width) x = image.width - 1;
@@ -211,7 +234,7 @@ double SampleTransmissionFactor(const FrameContext& context, int imageIndex, int
     double u = WrapCoord(uv.x, wrapS);
     double v = WrapCoord(uv.y, wrapT);
     int x = static_cast<int>(std::floor(u * image.width));
-    int y = static_cast<int>(std::floor((1.0 - v) * image.height));
+    int y = static_cast<int>(std::floor(v * image.height));
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= image.width) x = image.width - 1;
@@ -261,7 +284,9 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     // Phase 1: Clip and prepare triangles
     stats.trianglesInput = static_cast<uint64_t>(triangles.size());
 
-    std::vector<RasterTriangle> rasterTris;
+    RasterScratchBuffers& scratch = g_rasterScratch;
+    std::vector<RasterTriangle>& rasterTris = scratch.rasterTris;
+    rasterTris.clear();
     rasterTris.reserve(triangles.size() * 2);
 
     auto toScreenX = [width](double x) {
@@ -503,33 +528,57 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
 
     int totalTiles = tilesX * tilesY;
-    std::vector<double> tileMaxDepths(static_cast<size_t>(totalTiles), 1.0);
-    std::vector<int> tileMinXs(static_cast<size_t>(totalTiles));
-    std::vector<int> tileMinYs(static_cast<size_t>(totalTiles));
-    std::vector<int> tileMaxXs(static_cast<size_t>(totalTiles));
-    std::vector<int> tileMaxYs(static_cast<size_t>(totalTiles));
-    for (int t = 0; t < totalTiles; ++t) {
-        int ty = t / tilesX;
-        int tx = t - ty * tilesX;
-        int tileMinX = tx * TILE_SIZE;
-        int tileMinY = ty * TILE_SIZE;
-        int tileMaxX = std::min(tileMinX + TILE_SIZE - 1, width - 1);
-        int tileMaxY = std::min(tileMinY + TILE_SIZE - 1, height - 1);
-        tileMinXs[static_cast<size_t>(t)] = tileMinX;
-        tileMinYs[static_cast<size_t>(t)] = tileMinY;
-        tileMaxXs[static_cast<size_t>(t)] = tileMaxX;
-        tileMaxYs[static_cast<size_t>(t)] = tileMaxY;
+    std::vector<int>& tileMinXs = scratch.tileMinXs;
+    std::vector<int>& tileMinYs = scratch.tileMinYs;
+    std::vector<int>& tileMaxXs = scratch.tileMaxXs;
+    std::vector<int>& tileMaxYs = scratch.tileMaxYs;
+    const bool tileGridChanged =
+        scratch.cachedWidth != width ||
+        scratch.cachedHeight != height ||
+        scratch.cachedTilesX != tilesX ||
+        scratch.cachedTilesY != tilesY;
+
+    if (tileGridChanged) {
+        tileMinXs.resize(static_cast<size_t>(totalTiles));
+        tileMinYs.resize(static_cast<size_t>(totalTiles));
+        tileMaxXs.resize(static_cast<size_t>(totalTiles));
+        tileMaxYs.resize(static_cast<size_t>(totalTiles));
+        for (int t = 0; t < totalTiles; ++t) {
+            int ty = t / tilesX;
+            int tx = t - ty * tilesX;
+            int tileMinX = tx * TILE_SIZE;
+            int tileMinY = ty * TILE_SIZE;
+            int tileMaxX = std::min(tileMinX + TILE_SIZE - 1, width - 1);
+            int tileMaxY = std::min(tileMinY + TILE_SIZE - 1, height - 1);
+            tileMinXs[static_cast<size_t>(t)] = tileMinX;
+            tileMinYs[static_cast<size_t>(t)] = tileMinY;
+            tileMaxXs[static_cast<size_t>(t)] = tileMaxX;
+            tileMaxYs[static_cast<size_t>(t)] = tileMaxY;
+        }
+        scratch.cachedWidth = width;
+        scratch.cachedHeight = height;
+        scratch.cachedTilesX = tilesX;
+        scratch.cachedTilesY = tilesY;
     }
 
-    // Bin triangles into tiles to avoid O(tiles * tris)
-    // Also compute conservative triangle zMax for Hi-Z culling
-    std::vector<std::vector<size_t>> tileBins(static_cast<size_t>(totalTiles));
-    std::vector<double> triZMax(rasterTris.size());  // Conservative max depth per triangle
+    // Bin triangles into tiles with contiguous storage:
+    // pass1 count refs, prefix-sum to ranges, pass2 fill indices.
+    std::vector<size_t>& binCounts = scratch.binCounts;
+    std::vector<size_t>& binOffsets = scratch.binOffsets;
+    std::vector<size_t>& binWriteCursor = scratch.binWriteCursor;
+    std::vector<size_t>& binTriIndices = scratch.binTriIndices;
+    std::vector<int>& triMinTileX = scratch.triMinTileX;
+    std::vector<int>& triMaxTileX = scratch.triMaxTileX;
+    std::vector<int>& triMinTileY = scratch.triMinTileY;
+    std::vector<int>& triMaxTileY = scratch.triMaxTileY;
+    binCounts.assign(static_cast<size_t>(totalTiles), 0);
+    triMinTileX.resize(rasterTris.size());
+    triMaxTileX.resize(rasterTris.size());
+    triMinTileY.resize(rasterTris.size());
+    triMaxTileY.resize(rasterTris.size());
+
     for (size_t i = 0; i < rasterTris.size(); ++i) {
         const RasterTriangle& rt = rasterTris[i];
-        // Compute zMax for this triangle
-        triZMax[i] = std::max({rt.z0_over_w, rt.z1_over_w, rt.z2_over_w});
-        
         int minTileX = rt.minX / TILE_SIZE;
         int maxTileX = rt.maxX / TILE_SIZE;
         int minTileY = rt.minY / TILE_SIZE;
@@ -538,10 +587,37 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         minTileY = std::max(minTileY, 0);
         maxTileX = std::min(maxTileX, tilesX - 1);
         maxTileY = std::min(maxTileY, tilesY - 1);
+        triMinTileX[i] = minTileX;
+        triMaxTileX[i] = maxTileX;
+        triMinTileY[i] = minTileY;
+        triMaxTileY[i] = maxTileY;
         for (int ty = minTileY; ty <= maxTileY; ++ty) {
-            int rowBase = ty * tilesX;
+            const int rowBase = ty * tilesX;
             for (int tx = minTileX; tx <= maxTileX; ++tx) {
-                tileBins[static_cast<size_t>(rowBase + tx)].push_back(i);
+                ++binCounts[static_cast<size_t>(rowBase + tx)];
+            }
+        }
+    }
+
+    binOffsets.resize(static_cast<size_t>(totalTiles) + 1);
+    binOffsets[0] = 0;
+    for (int t = 0; t < totalTiles; ++t) {
+        binOffsets[static_cast<size_t>(t + 1)] = binOffsets[static_cast<size_t>(t)] + binCounts[static_cast<size_t>(t)];
+    }
+    const size_t totalBinRefs = binOffsets[static_cast<size_t>(totalTiles)];
+    binTriIndices.resize(totalBinRefs);
+    binWriteCursor.assign(binOffsets.begin(), binOffsets.begin() + static_cast<size_t>(totalTiles));
+
+    for (size_t i = 0; i < rasterTris.size(); ++i) {
+        const int minTileX = triMinTileX[i];
+        const int maxTileX = triMaxTileX[i];
+        const int minTileY = triMinTileY[i];
+        const int maxTileY = triMaxTileY[i];
+        for (int ty = minTileY; ty <= maxTileY; ++ty) {
+            const int rowBase = ty * tilesX;
+            for (int tx = minTileX; tx <= maxTileX; ++tx) {
+                const size_t tileIndex = static_cast<size_t>(rowBase + tx);
+                binTriIndices[binWriteCursor[tileIndex]++] = i;
             }
         }
     }
@@ -552,26 +628,31 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     const bool isBatchTransparent = !rasterTris.empty() && rasterTris[0].material.alphaMode == 2;
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < totalTiles; ++t) {
-        auto& bin = tileBins[static_cast<size_t>(t)];
+        const size_t begin = binOffsets[static_cast<size_t>(t)];
+        const size_t end = binOffsets[static_cast<size_t>(t + 1)];
+        if (end - begin < 2) {
+            continue;
+        }
+        auto itBegin = binTriIndices.begin() + static_cast<std::ptrdiff_t>(begin);
+        auto itEnd = binTriIndices.begin() + static_cast<std::ptrdiff_t>(end);
         if (isBatchTransparent) {
             // Back-to-front for transparent triangles
-            std::sort(bin.begin(), bin.end(), [&rasterTris](size_t a, size_t b) {
+            std::sort(itBegin, itEnd, [&rasterTris](size_t a, size_t b) {
                 return rasterTris[a].zMin > rasterTris[b].zMin;
             });
         } else {
             // Front-to-back for opaque triangles
-            std::sort(bin.begin(), bin.end(), [&rasterTris](size_t a, size_t b) {
+            std::sort(itBegin, itEnd, [&rasterTris](size_t a, size_t b) {
                 return rasterTris[a].zMin < rasterTris[b].zMin;
             });
         }
     }
 
-    size_t totalBinRefs = 0;
     size_t maxBinSize = 0;
-    for (const auto& bin : tileBins) {
-        totalBinRefs += bin.size();
-        if (bin.size() > maxBinSize) {
-            maxBinSize = bin.size();
+    for (int t = 0; t < totalTiles; ++t) {
+        const size_t binSize = binCounts[static_cast<size_t>(t)];
+        if (binSize > maxBinSize) {
+            maxBinSize = binSize;
         }
     }
     {
@@ -589,24 +670,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         OutputDebugStringA(buffer);
     }
 
-    #pragma omp parallel for schedule(static)
-    for (int t = 0; t < totalTiles; ++t) {
-        int tileMinX = tileMinXs[static_cast<size_t>(t)];
-        int tileMinY = tileMinYs[static_cast<size_t>(t)];
-        int tileMaxX = tileMaxXs[static_cast<size_t>(t)];
-        int tileMaxY = tileMaxYs[static_cast<size_t>(t)];
-
-        double tileMaxDepth = 0.0;
-        for (int y = tileMinY; y <= tileMaxY; ++y) {
-            int rowBase = y * width;
-            for (int x = tileMinX; x <= tileMaxX; ++x) {
-                tileMaxDepth = std::max(tileMaxDepth, depthData[rowBase + x]);
-            }
-        }
-        tileMaxDepths[static_cast<size_t>(t)] = tileMaxDepth;
-    }
-
-    OutputDebugStringA("Rasterizer: tile max depth pass done\n");
+    OutputDebugStringA("Rasterizer: tile max depth pass skipped\n");
 
     OutputDebugStringA("Rasterizer: tile raster pass start\n");
 
@@ -625,27 +689,26 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     #pragma omp parallel
     {
         FragmentShader fragmentShader;
+        uint64_t localPixelsTested = 0;
+        uint64_t localPixelsShaded = 0;
 
         // Parallelize by tile to avoid cross-thread writes to the same pixels
         #pragma omp for schedule(dynamic, 1)
         for (int t = 0; t < totalTiles; ++t) {
-            const auto& bin = tileBins[static_cast<size_t>(t)];
+            const size_t binBegin = binOffsets[static_cast<size_t>(t)];
+            const size_t binEnd = binOffsets[static_cast<size_t>(t + 1)];
+            if (binBegin == binEnd) {
+                continue;
+            }
 
             int tileMinX = tileMinXs[static_cast<size_t>(t)];
             int tileMinY = tileMinYs[static_cast<size_t>(t)];
             int tileMaxX = tileMaxXs[static_cast<size_t>(t)];
             int tileMaxY = tileMaxYs[static_cast<size_t>(t)];
-            for (size_t triIndex : bin) {
+
+            for (size_t binPos = binBegin; binPos < binEnd; ++binPos) {
+                const size_t triIndex = binTriIndices[binPos];
                 const RasterTriangle& rt = rasterTris[triIndex];
-                // Skip if triangle's nearest point is behind tile's farthest written depth
-                // (only for opaque/mask - transparent triangles don't write depth and should
-                //  still render in front of opaque geometry)
-                if (!isBatchTransparent) {
-                    double tileMaxDepth = tileMaxDepths[static_cast<size_t>(t)];
-                    if (rt.zMin > tileMaxDepth) {
-                        continue;
-                    }
-                }
                 
                 // Build per-triangle fragment context ONCE (not per-pixel!)
                 FragmentContext fragCtx;
@@ -772,6 +835,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                             int px = x + i;
                             int index = rowBase + px;
                             double depth = depths[i];
+                            localPixelsTested++;
                             
                             if (depth < 0.0 || depth >= depthData[index]) continue;
                             if (invWs[i] <= 0.0) continue;
@@ -809,6 +873,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                             if (needsAlphaTest && alpha < rt.material.alphaCutoff) continue;
 
                             double effectiveAlpha = alpha;
+                            localPixelsShaded++;
                             Vec3 shaded = fragmentShader.ShadeFast(fragCtx, varying,
                                 needsAlphaBlend ? &effectiveAlpha : nullptr);
                             // Premultiplied alpha blend: shaded already has diffuse/ambient
@@ -848,6 +913,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                         // Early depth test before expensive interpolation
                         double depth = bw0 * rt.z0_over_w + bw1 * rt.z1_over_w + bw2 * rt.z2_over_w;
                         int index = rowBase + x;
+                        localPixelsTested++;
                         if (depth < 0.0 || depth >= depthData[index]) {
                             w0 += rt.A12;
                             w1 += rt.A20;
@@ -898,6 +964,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                         }
 
                         double effectiveAlpha = alpha;
+                        localPixelsShaded++;
                         Vec3 shaded = fragmentShader.ShadeFast(fragCtx, varying,
                             needsAlphaBlend ? &effectiveAlpha : nullptr);
                         // Premultiplied alpha blend (same as SIMD path)
@@ -920,6 +987,11 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                 }
             }
         }
+
+        #pragma omp atomic
+        stats.pixelsTested += localPixelsTested;
+        #pragma omp atomic
+        stats.pixelsShaded += localPixelsShaded;
     } // end omp parallel
 
     OutputDebugStringA("Rasterizer: tile raster pass done\n");

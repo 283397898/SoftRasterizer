@@ -163,7 +163,7 @@ void Renderer::Render(const GPUScene& scene) {
     frameContext.lights.push_back(defaultLight);
     RenderQueue renderQueue;
     GPUSceneRenderQueueBuilder queueBuilder;
-    queueBuilder.Build(scene, renderQueue);
+    queueBuilder.Build(scene, renderQueue, m_config.debugOnlyMaterialIndex);
     auto setupEnd = Clock::now();
 
     PassContext passContext{};

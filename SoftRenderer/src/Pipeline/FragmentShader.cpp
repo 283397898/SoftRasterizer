@@ -135,7 +135,7 @@ SampledColor SampleImageNearest(const GLTFImage& image, const GLTFSampler* sampl
     double v = WrapCoord(uv.y, wrapT);
 
     int x = static_cast<int>(u * image.width);
-    int y = static_cast<int>((1.0 - v) * image.height);
+    int y = static_cast<int>(v * image.height);
     x = std::max(0, std::min(x, image.width - 1));
     y = std::max(0, std::min(y, image.height - 1));
 
@@ -168,7 +168,7 @@ SampledColor SampleImageBilinear(const GLTFImage& image, const GLTFSampler* samp
     double v = WrapCoord(uv.y, wrapT);
 
     double fx = u * (image.width - 1);
-    double fy = (1.0 - v) * (image.height - 1);
+    double fy = v * (image.height - 1);
     int x0 = static_cast<int>(fx);
     int y0 = static_cast<int>(fy);
     int x1 = std::min(x0 + 1, image.width - 1);
@@ -263,7 +263,7 @@ SampledColor SampleGeneric(const FragmentInput& input, int imageIndex, int sampl
     
     if (useLinear) {
         double fx = u * (image.width - 1);
-        double fy = (1.0 - v) * (image.height - 1);
+        double fy = v * (image.height - 1);
         int x0 = static_cast<int>(fx);
         int y0 = static_cast<int>(fy);
         int x1 = std::min(x0 + 1, image.width - 1);
@@ -299,7 +299,7 @@ SampledColor SampleGeneric(const FragmentInput& input, int imageIndex, int sampl
         return {rgb, a0 * (1.0 - ty) + a1 * ty};
     } else {
         int x = static_cast<int>(u * image.width);
-        int y = static_cast<int>((1.0 - v) * image.height);
+        int y = static_cast<int>(v * image.height);
         x = std::max(0, std::min(x, image.width - 1));
         y = std::max(0, std::min(y, image.height - 1));
         size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
@@ -339,7 +339,7 @@ SampledColor SampleGenericAtUV(const FragmentInput& input, int imageIndex, int s
 
     if (useLinear) {
         double fx = u * (image.width - 1);
-        double fy = (1.0 - v) * (image.height - 1);
+        double fy = v * (image.height - 1);
         int x0 = static_cast<int>(fx);
         int y0 = static_cast<int>(fy);
         int x1 = std::min(x0 + 1, image.width - 1);
@@ -375,7 +375,7 @@ SampledColor SampleGenericAtUV(const FragmentInput& input, int imageIndex, int s
         return {rgb, a0 * (1.0 - ty) + a1 * ty};
     } else {
         int x = static_cast<int>(u * image.width);
-        int y = static_cast<int>((1.0 - v) * image.height);
+        int y = static_cast<int>(v * image.height);
         x = std::max(0, std::min(x, image.width - 1));
         y = std::max(0, std::min(y, image.height - 1));
         size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
@@ -658,7 +658,7 @@ SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
     if (useLinear) {
         // Bilinear filtering
         const double fx = u * (w - 1);
-        const double fy = (1.0 - v) * (h - 1);
+        const double fy = v * (h - 1);
         const int x0 = static_cast<int>(fx);
         const int y0 = static_cast<int>(fy);
         const int x1 = (x0 + 1 < w) ? x0 + 1 : x0;  // Branchless clamp
@@ -706,7 +706,7 @@ SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
     } else {
         // Nearest filtering
         int x = static_cast<int>(u * w);
-        int y = static_cast<int>((1.0 - v) * h);
+        int y = static_cast<int>(v * h);
         // Branchless clamp
         x = (x < 0) ? 0 : ((x >= w) ? w - 1 : x);
         y = (y < 0) ? 0 : ((y >= h) ? h - 1 : y);

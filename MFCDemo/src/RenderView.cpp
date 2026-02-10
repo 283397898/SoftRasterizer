@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
+#include <vector>
 
 #include "Math/Vec4.h"
 
@@ -20,6 +24,97 @@ struct BoundsResult {
     SR::Vec3 center;
     SR::Vec3 extent;
 };
+
+inline uint8_t ToneMapToSRGB8(double v) {
+    if (v < 0.0) {
+        v = 0.0;
+    }
+    // 与软光栅器内部一致，便于肉眼比对
+    constexpr double a = 2.51;
+    constexpr double b = 0.03;
+    constexpr double c = 2.43;
+    constexpr double d = 0.59;
+    constexpr double e = 0.14;
+    const double mapped = (v * (a * v + b)) / (v * (c * v + d) + e);
+    const double clamped = std::clamp(mapped, 0.0, 1.0);
+    const double srgb = std::pow(clamped, 1.0 / 2.2);
+    return static_cast<uint8_t>(srgb * 255.0 + 0.5);
+}
+
+bool SaveLinearFramebufferToBMP(const SR::Vec3* linearPixels,
+                                int width,
+                                int height,
+                                double exposure,
+                                const std::filesystem::path& outputPath) {
+    if (!linearPixels || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> pixelBytes(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0u);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const size_t srcIndex = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+            const SR::Vec3& c = linearPixels[srcIndex];
+            const uint8_t r = ToneMapToSRGB8(c.x * exposure);
+            const uint8_t g = ToneMapToSRGB8(c.y * exposure);
+            const uint8_t b = ToneMapToSRGB8(c.z * exposure);
+
+            // BMP 使用 bottom-up 存储
+            const int dstY = height - 1 - y;
+            const size_t dstIndex = (static_cast<size_t>(dstY) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+            pixelBytes[dstIndex + 0] = b;
+            pixelBytes[dstIndex + 1] = g;
+            pixelBytes[dstIndex + 2] = r;
+            pixelBytes[dstIndex + 3] = 255u;
+        }
+    }
+
+    #pragma pack(push, 1)
+    struct BMPFileHeader {
+        uint16_t bfType = 0x4D42; // "BM"
+        uint32_t bfSize = 0;
+        uint16_t bfReserved1 = 0;
+        uint16_t bfReserved2 = 0;
+        uint32_t bfOffBits = 14u + 40u;
+    };
+
+    struct BMPInfoHeader {
+        uint32_t biSize = 40u;
+        int32_t biWidth = 0;
+        int32_t biHeight = 0;
+        uint16_t biPlanes = 1u;
+        uint16_t biBitCount = 32u;
+        uint32_t biCompression = 0u; // BI_RGB
+        uint32_t biSizeImage = 0u;
+        int32_t biXPelsPerMeter = 0;
+        int32_t biYPelsPerMeter = 0;
+        uint32_t biClrUsed = 0u;
+        uint32_t biClrImportant = 0u;
+    };
+    #pragma pack(pop)
+
+    static_assert(sizeof(BMPFileHeader) == 14, "BMPFileHeader size must be 14 bytes");
+    static_assert(sizeof(BMPInfoHeader) == 40, "BMPInfoHeader size must be 40 bytes");
+
+    BMPFileHeader fileHeader{};
+    BMPInfoHeader infoHeader{};
+    infoHeader.biWidth = width;
+    infoHeader.biHeight = height;
+    infoHeader.biSizeImage = static_cast<uint32_t>(pixelBytes.size());
+    fileHeader.bfSize = fileHeader.bfOffBits + infoHeader.biSizeImage;
+
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+    std::ofstream file(outputPath, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    file.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
+    file.write(reinterpret_cast<const char*>(&infoHeader), sizeof(infoHeader));
+    file.write(reinterpret_cast<const char*>(pixelBytes.data()), static_cast<std::streamsize>(pixelBytes.size()));
+    return static_cast<bool>(file);
+}
 
 /**
  * @brief 从 GPUScene 中的网格计算世界空间包围球/包围盒
@@ -156,6 +251,10 @@ void CRenderView::Initialize(int width, int height) {
     m_scene.SetLightGroup(&m_lights);
 
     m_scene.SetCamera(&m_camera);
+
+    if (m_hasGLB) {
+        ExportMaterialDebugFrames(asset);
+    }
 }
 
 /**
@@ -293,6 +392,66 @@ void CRenderView::OnMouseWheel(int delta) {
     // 限制缩放范围 (更宽范围以适配大模型)
     newDistance = std::fmax(0.2, std::fmin(newDistance, 5000.0));
     m_camera.SetDistance(newDistance);
+}
+
+void CRenderView::ExportMaterialDebugFrames(const GLTFAsset& asset) {
+    if (m_materialDebugExported) {
+        return;
+    }
+
+    int targetMaterialIndex = -1;
+    for (size_t i = 0; i < asset.materials.size(); ++i) {
+        if (asset.materials[i].name == m_debugMaterialName) {
+            targetMaterialIndex = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (targetMaterialIndex < 0) {
+        OutputDebugStringA(("Material debug export skipped: material not found: " + m_debugMaterialName + "\n").c_str());
+        return;
+    }
+
+    RendererConfig originalConfig = m_renderer.GetConfig();
+
+    // 先导出全场景结果用于对照
+    RendererConfig fullConfig = originalConfig;
+    fullConfig.debugOnlyMaterialIndex = -1;
+    m_renderer.SetConfig(fullConfig);
+    Render();
+
+    const std::filesystem::path exportDir = std::filesystem::current_path() / "debug_exports";
+    const std::filesystem::path fullPath = exportDir / "full_scene_reference.bmp";
+    bool fullOk = SaveLinearFramebufferToBMP(
+        m_renderer.GetFramebufferLinear(),
+        m_renderer.GetWidth(),
+        m_renderer.GetHeight(),
+        fullConfig.exposure,
+        fullPath);
+
+    // 再导出仅目标材质的结果
+    RendererConfig isolateConfig = originalConfig;
+    isolateConfig.debugOnlyMaterialIndex = targetMaterialIndex;
+    m_renderer.SetConfig(isolateConfig);
+    Render();
+
+    const std::filesystem::path isolatedPath = exportDir / ("material_only_" + m_debugMaterialName + ".bmp");
+    bool isolatedOk = SaveLinearFramebufferToBMP(
+        m_renderer.GetFramebufferLinear(),
+        m_renderer.GetWidth(),
+        m_renderer.GetHeight(),
+        isolateConfig.exposure,
+        isolatedPath);
+
+    m_renderer.SetConfig(originalConfig);
+    m_materialDebugExported = fullOk && isolatedOk;
+
+    std::string message = "Material debug export: ";
+    message += fullOk ? ("full=" + fullPath.string()) : "full=FAILED";
+    message += ", ";
+    message += isolatedOk ? ("isolated=" + isolatedPath.string()) : "isolated=FAILED";
+    message += "\n";
+    OutputDebugStringA(message.c_str());
 }
 
 /**

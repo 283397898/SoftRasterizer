@@ -364,7 +364,9 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				if (i < tangents4.size()) {
 					tangent = Vec3{tangents4[i].x, tangents4[i].y, tangents4[i].z};
 					tangent.z = -tangent.z;
-					tangentW = tangents4[i].w;
+					// glTF 顶点在导入时做了 Z 翻转 (右手->左手)，该变换会改变切线空间手性，
+					// 需要同步翻转 tangentW，否则法线贴图的副切线方向会反，导致光照方向错误。
+					tangentW = -tangents4[i].w;
 				}
 
 				vertices[i] = Vertex{pos, normal, uv, uv1, color, tangent, tangentW};
