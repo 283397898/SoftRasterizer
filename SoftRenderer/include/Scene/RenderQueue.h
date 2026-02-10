@@ -28,16 +28,25 @@ struct DrawItem {
     int normalTextureIndex = -1;                  ///< 法线纹理索引
     int occlusionTextureIndex = -1;               ///< 遮蔽纹理索引
     int emissiveTextureIndex = -1;                ///< 自发光纹理索引
+    int transmissionTextureIndex = -1;            ///< 透射纹理索引
     int baseColorImageIndex = -1;                 ///< 基础颜色图像索引
     int metallicRoughnessImageIndex = -1;         ///< 金属度-粗糙度图像索引
     int normalImageIndex = -1;                     ///< 法线图像索引
     int occlusionImageIndex = -1;                  ///< 遮蔽图像索引
     int emissiveImageIndex = -1;                   ///< 自发光图像索引
+    int transmissionImageIndex = -1;              ///< 透射图像索引
     int baseColorSamplerIndex = -1;               ///< 基础颜色采样器索引
     int metallicRoughnessSamplerIndex = -1;       ///< 金属度-粗糙度采样器索引
     int normalSamplerIndex = -1;                  ///< 法线采样器索引
     int occlusionSamplerIndex = -1;               ///< 遮蔽采样器索引
     int emissiveSamplerIndex = -1;                ///< 自发光采样器索引
+    int transmissionSamplerIndex = -1;            ///< 透射采样器索引
+    int baseColorTexCoordSet = 0;                 ///< 基础颜色 UV 集索引
+    int metallicRoughnessTexCoordSet = 0;         ///< 金属度-粗糙度 UV 集索引
+    int normalTexCoordSet = 0;                    ///< 法线 UV 集索引
+    int occlusionTexCoordSet = 0;                 ///< 遮蔽 UV 集索引
+    int emissiveTexCoordSet = 0;                  ///< 自发光 UV 集索引
+    int transmissionTexCoordSet = 0;              ///< 透射纹理 UV 集索引
 };
 
 /**

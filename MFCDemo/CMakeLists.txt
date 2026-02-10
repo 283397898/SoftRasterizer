@@ -12,6 +12,7 @@ target_include_directories(MFCDemo PRIVATE
 
 if (MSVC)
     target_compile_definitions(MFCDemo PRIVATE _UNICODE UNICODE)
+    target_compile_options(MFCDemo PRIVATE /utf-8)
     set_target_properties(MFCDemo PROPERTIES
         WIN32_EXECUTABLE TRUE
     )

@@ -16,6 +16,8 @@ struct ClipVertex {
     Vec3 normal;    ///< 法线
     Vec3 world;     ///< 世界空间位置
     Vec2 texCoord;  ///< 纹理坐标
+    Vec2 texCoord1; ///< 第二套纹理坐标
+    Vec4 color{1.0, 1.0, 1.0, 1.0}; ///< 顶点颜色
     Vec3 tangent;   ///< 切线
 };
 

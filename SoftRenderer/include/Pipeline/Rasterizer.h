@@ -23,10 +23,17 @@ struct Triangle {
     Vec2 t0{};
     Vec2 t1{};
     Vec2 t2{};
+    Vec2 t0_1{};
+    Vec2 t1_1{};
+    Vec2 t2_1{};
+    Vec4 c0{};
+    Vec4 c1{};
+    Vec4 c2{};
 
     Vec3 tg0{};
     Vec3 tg1{};
     Vec3 tg2{};
+    double tangentW = 1.0; ///< 切线 W 分量 (+1/-1)，决定副切线方向
 
     Vec3 w0{};
     Vec3 w1{};
@@ -47,16 +54,25 @@ struct Triangle {
     int normalTextureIndex = -1;
     int occlusionTextureIndex = -1;
     int emissiveTextureIndex = -1;
+    int transmissionTextureIndex = -1;
     int baseColorImageIndex = -1;
     int metallicRoughnessImageIndex = -1;
     int normalImageIndex = -1;
     int occlusionImageIndex = -1;
     int emissiveImageIndex = -1;
+    int transmissionImageIndex = -1;
     int baseColorSamplerIndex = -1;
     int metallicRoughnessSamplerIndex = -1;
     int normalSamplerIndex = -1;
     int occlusionSamplerIndex = -1;
     int emissiveSamplerIndex = -1;
+    int transmissionSamplerIndex = -1;
+    int baseColorTexCoordSet = 0;
+    int metallicRoughnessTexCoordSet = 0;
+    int normalTexCoordSet = 0;
+    int occlusionTexCoordSet = 0;
+    int emissiveTexCoordSet = 0;
+    int transmissionTexCoordSet = 0;
 };
 
 /**

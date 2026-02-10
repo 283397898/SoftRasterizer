@@ -70,6 +70,8 @@ std::vector<ClipVertex> ClipPolygonAgainstPlane(const std::vector<ClipVertex>& i
             intersect.normal = Lerp(prev.normal, curr.normal, t);
             intersect.world = Lerp(prev.world, curr.world, t);
             intersect.texCoord = Lerp(prev.texCoord, curr.texCoord, t);
+            intersect.texCoord1 = Lerp(prev.texCoord1, curr.texCoord1, t);
+            intersect.color = Lerp(prev.color, curr.color, t);
             intersect.tangent = Lerp(prev.tangent, curr.tangent, t);
             output.push_back(intersect);
         } else if (!prevInside && currInside) {
@@ -79,6 +81,8 @@ std::vector<ClipVertex> ClipPolygonAgainstPlane(const std::vector<ClipVertex>& i
             intersect.normal = Lerp(prev.normal, curr.normal, t);
             intersect.world = Lerp(prev.world, curr.world, t);
             intersect.texCoord = Lerp(prev.texCoord, curr.texCoord, t);
+            intersect.texCoord1 = Lerp(prev.texCoord1, curr.texCoord1, t);
+            intersect.color = Lerp(prev.color, curr.color, t);
             intersect.tangent = Lerp(prev.tangent, curr.tangent, t);
             output.push_back(intersect);
             output.push_back(curr);

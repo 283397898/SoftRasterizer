@@ -38,16 +38,25 @@ void GPUSceneBuilder::BuildFromObjectGroup(const ObjectGroup& objects, GPUScene&
         item.normalTextureIndex = -1;
         item.occlusionTextureIndex = -1;
         item.emissiveTextureIndex = -1;
+        item.transmissionTextureIndex = -1;
         item.baseColorImageIndex = -1;
         item.metallicRoughnessImageIndex = -1;
         item.normalImageIndex = -1;
         item.occlusionImageIndex = -1;
         item.emissiveImageIndex = -1;
+        item.transmissionImageIndex = -1;
         item.baseColorSamplerIndex = -1;
         item.metallicRoughnessSamplerIndex = -1;
         item.normalSamplerIndex = -1;
         item.occlusionSamplerIndex = -1;
         item.emissiveSamplerIndex = -1;
+        item.transmissionSamplerIndex = -1;
+        item.baseColorTexCoordSet = 0;
+        item.metallicRoughnessTexCoordSet = 0;
+        item.normalTexCoordSet = 0;
+        item.occlusionTexCoordSet = 0;
+        item.emissiveTexCoordSet = 0;
+        item.transmissionTexCoordSet = 0;
         outScene.AddDrawable(item);
 
         lastMaterial = material;

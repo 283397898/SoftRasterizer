@@ -180,6 +180,24 @@ inline uint8_t LinearToSRGBFast(double v) {
 }
 
 /**
+ * @brief ACES Filmic 色调映射
+ *
+ * 将 HDR 线性值 [0, ∞) 映射到 [0, 1)。
+ * 保持色彩比例，避免逐通道裁剪导致的色移。
+ * 参考：Stephen Hill, ACES Filmic Tone Mapping Curve (Krzysztof Narkowicz fit)
+ */
+inline double ACESToneMap(double x) {
+    if (x <= 0.0) return 0.0;
+    constexpr double a = 2.51;
+    constexpr double b = 0.03;
+    constexpr double c = 2.43;
+    constexpr double d = 0.59;
+    constexpr double e = 0.14;
+    double mapped = (x * (a * x + b)) / (x * (c * x + d) + e);
+    return (mapped < 0.0) ? 0.0 : ((mapped > 1.0) ? 1.0 : mapped);
+}
+
+/**
  * @brief 执行色调映射和 sRGB 空间转换并存入对应像素缓冲区
  */
 void Framebuffer::ResolveToSRGB(double exposure, bool dither) {
@@ -205,9 +223,10 @@ void Framebuffer::ResolveToSRGB(double exposure, bool dither) {
             const int idx = rowBase + x;
             const Vec3& c = srcPixels[idx];
             
-            double r = c.x * exposure;
-            double g = c.y * exposure;
-            double b = c.z * exposure;
+            // Apply exposure then ACES tone mapping (preserves color ratios)
+            double r = ACESToneMap(c.x * exposure);
+            double g = ACESToneMap(c.y * exposure);
+            double b = ACESToneMap(c.z * exposure);
 
             if (dither) {
                 const double t = kDitherPattern[yPattern | (x & 1)];

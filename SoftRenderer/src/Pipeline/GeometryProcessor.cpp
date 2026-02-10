@@ -50,6 +50,12 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
         const Vec2& t0 = vertices[i0].texCoord;
         const Vec2& t1 = vertices[i1].texCoord;
         const Vec2& t2 = vertices[i2].texCoord;
+        const Vec2& t0_1 = vertices[i0].texCoord1;
+        const Vec2& t1_1 = vertices[i1].texCoord1;
+        const Vec2& t2_1 = vertices[i2].texCoord1;
+        const Vec4& c0 = vertices[i0].color;
+        const Vec4& c1 = vertices[i1].color;
+        const Vec4& c2 = vertices[i2].color;
 
         const Vec3& tg0 = vertices[i0].tangent;
         const Vec3& tg1 = vertices[i1].tangent;
@@ -63,10 +69,17 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
         tri.t0 = t0;
         tri.t1 = t1;
         tri.t2 = t2;
+        tri.t0_1 = t0_1;
+        tri.t1_1 = t1_1;
+        tri.t2_1 = t2_1;
+        tri.c0 = c0;
+        tri.c1 = c1;
+        tri.c2 = c2;
 
         tri.tg0 = tg0;
         tri.tg1 = tg1;
         tri.tg2 = tg2;
+        tri.tangentW = vertices[i0].tangentW; // 取第一个顶点的 w（同一三角形内通常一致）
 
         Vec4 wp0 = modelMatrix.Multiply(Vec4{p0.x, p0.y, p0.z, 1.0});
         Vec4 wp1 = modelMatrix.Multiply(Vec4{p1.x, p1.y, p1.z, 1.0});
@@ -94,16 +107,25 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
         tri.normalTextureIndex = item.normalTextureIndex;
         tri.occlusionTextureIndex = item.occlusionTextureIndex;
         tri.emissiveTextureIndex = item.emissiveTextureIndex;
+        tri.transmissionTextureIndex = item.transmissionTextureIndex;
         tri.baseColorImageIndex = item.baseColorImageIndex;
         tri.metallicRoughnessImageIndex = item.metallicRoughnessImageIndex;
         tri.normalImageIndex = item.normalImageIndex;
         tri.occlusionImageIndex = item.occlusionImageIndex;
         tri.emissiveImageIndex = item.emissiveImageIndex;
+        tri.transmissionImageIndex = item.transmissionImageIndex;
         tri.baseColorSamplerIndex = item.baseColorSamplerIndex;
         tri.metallicRoughnessSamplerIndex = item.metallicRoughnessSamplerIndex;
         tri.normalSamplerIndex = item.normalSamplerIndex;
         tri.occlusionSamplerIndex = item.occlusionSamplerIndex;
         tri.emissiveSamplerIndex = item.emissiveSamplerIndex;
+        tri.transmissionSamplerIndex = item.transmissionSamplerIndex;
+        tri.baseColorTexCoordSet = item.baseColorTexCoordSet;
+        tri.metallicRoughnessTexCoordSet = item.metallicRoughnessTexCoordSet;
+        tri.normalTexCoordSet = item.normalTexCoordSet;
+        tri.occlusionTexCoordSet = item.occlusionTexCoordSet;
+        tri.emissiveTexCoordSet = item.emissiveTexCoordSet;
+        tri.transmissionTexCoordSet = item.transmissionTexCoordSet;
         outTriangles.push_back(tri);
     }
 

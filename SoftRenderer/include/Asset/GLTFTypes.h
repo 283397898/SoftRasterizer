@@ -72,6 +72,22 @@ struct GLTFMaterial {
     GLTFTextureInfo normalTexture{};
     GLTFTextureInfo occlusionTexture{};
     GLTFTextureInfo emissiveTexture{};
+    struct {
+        double transmissionFactor = 0.0;
+        GLTFTextureInfo transmissionTexture{};
+        bool hasTransmission = false;
+    } transmission{};
+    struct {
+        double ior = 1.5;
+        bool hasIOR = false;
+    } iorExt{};
+    struct {
+        double specularFactor = 1.0;
+        double specularColorFactor[3] = {1.0, 1.0, 1.0};
+        GLTFTextureInfo specularTexture{};
+        GLTFTextureInfo specularColorTexture{};
+        bool hasSpecular = false;
+    } specular{};
     double emissiveFactor[3] = {0.0, 0.0, 0.0};
     int alphaMode = 0;
     double alphaCutoff = 0.5;

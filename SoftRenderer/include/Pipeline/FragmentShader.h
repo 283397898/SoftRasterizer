@@ -6,6 +6,7 @@
 #include "Material/PBRMaterial.h"
 #include "Math/Vec2.h"
 #include "Math/Vec3.h"
+#include "Math/Vec4.h"
 #include "Scene/LightGroup.h"
 
 namespace SR {
@@ -32,11 +33,21 @@ struct FragmentContext {
     int normalImageIndex = -1;
     int occlusionImageIndex = -1;
     int emissiveImageIndex = -1;
+    int transmissionImageIndex = -1;
     int baseColorSamplerIndex = -1;
     int metallicRoughnessSamplerIndex = -1;
     int normalSamplerIndex = -1;
     int occlusionSamplerIndex = -1;
     int emissiveSamplerIndex = -1;
+    int transmissionSamplerIndex = -1;
+    int baseColorTexCoordSet = 0;
+    int metallicRoughnessTexCoordSet = 0;
+    int normalTexCoordSet = 0;
+    int occlusionTexCoordSet = 0;
+    int emissiveTexCoordSet = 0;
+    int transmissionTexCoordSet = 0;
+    
+    double tangentW = 1.0; ///< 切线 W 分量 (+1/-1)，决定副切线方向
     
     // Precomputed light data (pointer to avoid vector copy - set by Rasterizer)
     const PrecomputedLight* precomputedLights = nullptr;
@@ -48,6 +59,8 @@ struct FragmentVarying {
     Vec3 normal;
     Vec3 worldPos;
     Vec2 texCoord;
+    Vec2 texCoord1;
+    Vec4 color;
     Vec3 tangent;
 };
 
@@ -57,7 +70,10 @@ struct FragmentInput {
     Vec3 worldPos;
     Vec3 cameraPos;
     Vec2 texCoord;
+    Vec2 texCoord1;
+    Vec4 color;
     Vec3 tangent;
+    double tangentW = 1.0; ///< 切线 W 分量 (+1/-1)
     PBRMaterial material;
     const std::vector<DirectionalLight>* lights = nullptr;
     Vec3 ambientColor{0.03f, 0.03f, 0.03f};
@@ -77,11 +93,19 @@ struct FragmentInput {
     int normalImageIndex = -1;
     int occlusionImageIndex = -1;
     int emissiveImageIndex = -1;
+    int transmissionImageIndex = -1;
     int baseColorSamplerIndex = -1;
     int metallicRoughnessSamplerIndex = -1;
     int normalSamplerIndex = -1;
     int occlusionSamplerIndex = -1;
     int emissiveSamplerIndex = -1;
+    int transmissionSamplerIndex = -1;
+    int baseColorTexCoordSet = 0;
+    int metallicRoughnessTexCoordSet = 0;
+    int normalTexCoordSet = 0;
+    int occlusionTexCoordSet = 0;
+    int emissiveTexCoordSet = 0;
+    int transmissionTexCoordSet = 0;
 };
 
 /**
@@ -92,8 +116,10 @@ public:
     /** @brief 基础着色方法 (兼容性版本) */
     Vec3 Shade(const FragmentInput& input) const;
     
-    /** @brief 优化的着色方法：Context 为三角形级常数，Varying 为像素级变量 */
-    Vec3 ShadeFast(const FragmentContext& ctx, const FragmentVarying& varying) const;
+    /** @brief 优化的着色方法：Context 为三角形级常数，Varying 为像素级变量
+     *  @param outEffectiveAlpha 如果非 nullptr，将输出 Fresnel 调制后的有效混合 alpha
+     */
+    Vec3 ShadeFast(const FragmentContext& ctx, const FragmentVarying& varying, double* outEffectiveAlpha = nullptr) const;
 };
 
 } // namespace SR

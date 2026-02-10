@@ -3,9 +3,12 @@
 #include "Pipeline/GeometryProcessor.h"
 #include "Pipeline/Rasterizer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <vector>
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 
 namespace SR {
@@ -44,8 +47,32 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
 
     using Clock = std::chrono::high_resolution_clock;
 
+    // Build a sorted list: opaque first, then blend back-to-front.
+    std::vector<DrawItem> sortedItems = queue.GetItems();
+    const Vec3 cameraPos = pass.frame.cameraPos;
+    auto getItemSortKey = [&cameraPos](const DrawItem& item) {
+        Vec3 pos{item.modelMatrix.m[3][0], item.modelMatrix.m[3][1], item.modelMatrix.m[3][2]};
+        Vec3 d = pos - cameraPos;
+        return d.x * d.x + d.y * d.y + d.z * d.z;
+    };
+    std::stable_sort(sortedItems.begin(), sortedItems.end(),
+        [&getItemSortKey](const DrawItem& a, const DrawItem& b) {
+            int alphaModeA = a.material ? a.material->alphaMode : 0;
+            int alphaModeB = b.material ? b.material->alphaMode : 0;
+            if (alphaModeA != alphaModeB) {
+                return alphaModeA < alphaModeB;
+            }
+            if (alphaModeA == 2) {
+                return getItemSortKey(a) > getItemSortKey(b);
+            }
+            if (a.material != b.material) {
+                return a.material < b.material;
+            }
+            return a.mesh < b.mesh;
+        });
+
     // 遍历渲染队列中每一个绘制项
-    for (const DrawItem& item : queue.GetItems()) {
+    for (const DrawItem& item : sortedItems) {
         if (!item.mesh || !item.material) {
             continue;
         }

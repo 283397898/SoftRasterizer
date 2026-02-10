@@ -25,16 +25,25 @@ struct GPUSceneDrawItem {
     int normalTextureIndex = -1;
     int occlusionTextureIndex = -1;
     int emissiveTextureIndex = -1;
+    int transmissionTextureIndex = -1;
     int baseColorImageIndex = -1;
     int metallicRoughnessImageIndex = -1;
     int normalImageIndex = -1;
     int occlusionImageIndex = -1;
     int emissiveImageIndex = -1;
+    int transmissionImageIndex = -1;
     int baseColorSamplerIndex = -1;
     int metallicRoughnessSamplerIndex = -1;
     int normalSamplerIndex = -1;
     int occlusionSamplerIndex = -1;
     int emissiveSamplerIndex = -1;
+    int transmissionSamplerIndex = -1;
+    int baseColorTexCoordSet = 0;
+    int metallicRoughnessTexCoordSet = 0;
+    int normalTexCoordSet = 0;
+    int occlusionTexCoordSet = 0;
+    int emissiveTexCoordSet = 0;
+    int transmissionTexCoordSet = 0;
 };
 
 /**

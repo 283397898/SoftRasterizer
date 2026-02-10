@@ -469,6 +469,39 @@ bool ParseGLTFJson(const JSONValue& root, const std::filesystem::path& basePath,
                 material.pbr.roughnessFactor = ReadDouble(pbr["roughnessFactor"], material.pbr.roughnessFactor);
                 ParseTextureInfo(pbr["metallicRoughnessTexture"], material.pbr.metallicRoughnessTexture, false, false);
             }
+            const JSONValue& extensions = materialObj["extensions"];
+            if (extensions.IsObject()) {
+                // KHR_materials_transmission
+                if (extensions.HasKey("KHR_materials_transmission")) {
+                    const JSONValue& transmission = extensions["KHR_materials_transmission"];
+                    if (transmission.IsObject()) {
+                        material.transmission.hasTransmission = true;
+                        material.transmission.transmissionFactor =
+                            ReadDouble(transmission["transmissionFactor"], material.transmission.transmissionFactor);
+                        ParseTextureInfo(transmission["transmissionTexture"], material.transmission.transmissionTexture, false, false);
+                    }
+                }
+                // KHR_materials_ior
+                if (extensions.HasKey("KHR_materials_ior")) {
+                    const JSONValue& iorObj = extensions["KHR_materials_ior"];
+                    if (iorObj.IsObject()) {
+                        material.iorExt.hasIOR = true;
+                        material.iorExt.ior = ReadDouble(iorObj["ior"], material.iorExt.ior);
+                    }
+                }
+                // KHR_materials_specular
+                if (extensions.HasKey("KHR_materials_specular")) {
+                    const JSONValue& specObj = extensions["KHR_materials_specular"];
+                    if (specObj.IsObject()) {
+                        material.specular.hasSpecular = true;
+                        material.specular.specularFactor =
+                            ReadDouble(specObj["specularFactor"], material.specular.specularFactor);
+                        ReadArray(specObj["specularColorFactor"], material.specular.specularColorFactor, 3);
+                        ParseTextureInfo(specObj["specularTexture"], material.specular.specularTexture, false, false);
+                        ParseTextureInfo(specObj["specularColorTexture"], material.specular.specularColorTexture, false, false);
+                    }
+                }
+            }
             ParseTextureInfo(materialObj["normalTexture"], material.normalTexture, true, false);
             ParseTextureInfo(materialObj["occlusionTexture"], material.occlusionTexture, false, true);
             ParseTextureInfo(materialObj["emissiveTexture"], material.emissiveTexture, false, false);

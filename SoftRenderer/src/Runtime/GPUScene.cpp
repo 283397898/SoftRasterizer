@@ -5,7 +5,6 @@
 #include <utility>
 #include <chrono>
 #include <cstdio>
-#define NOMINMAX
 #include <windows.h>
 #undef min
 #undef max
@@ -212,8 +211,31 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 		material.roughness = srcMat.pbr.roughnessFactor;
 		material.doubleSided = srcMat.doubleSided;
 		material.alpha = srcMat.pbr.baseColorFactor[3];
+		material.transmissionFactor = srcMat.transmission.hasTransmission
+			? std::clamp(srcMat.transmission.transmissionFactor, 0.0, 1.0)
+			: 0.0;
 		material.alphaMode = srcMat.alphaMode;
 		material.alphaCutoff = srcMat.alphaCutoff;
+		material.emissiveFactor = Vec3{srcMat.emissiveFactor[0], srcMat.emissiveFactor[1], srcMat.emissiveFactor[2]};
+		// KHR_materials_ior
+		if (srcMat.iorExt.hasIOR) {
+			material.ior = std::max(1.0, srcMat.iorExt.ior);
+		}
+		// KHR_materials_specular
+		if (srcMat.specular.hasSpecular) {
+			material.specularFactor = std::clamp(srcMat.specular.specularFactor, 0.0, 1.0);
+			material.specularColorFactor = Vec3{
+				std::clamp(srcMat.specular.specularColorFactor[0], 0.0, 1.0),
+				std::clamp(srcMat.specular.specularColorFactor[1], 0.0, 1.0),
+				std::clamp(srcMat.specular.specularColorFactor[2], 0.0, 1.0)
+			};
+		}
+		bool hasTransmissionTexture = srcMat.transmission.hasTransmission &&
+			srcMat.transmission.transmissionTexture.textureIndex >= 0;
+		if (srcMat.transmission.hasTransmission &&
+			(material.transmissionFactor > 0.0 || hasTransmissionTexture)) {
+			material.alphaMode = 2; // BLEND
+		}
 		m_ownedMaterials.push_back(material);
 	}
 	PBRMaterial defaultMaterial{};
@@ -269,6 +291,31 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 					texcoords = accessor.Read<Vec2>(asset, asset.accessors[texAccessorIndex]);
 				}
 			}
+			std::vector<Vec2> texcoords1;
+			auto tex1It = prim.attributes.find("TEXCOORD_1");
+			if (tex1It != prim.attributes.end()) {
+				int texAccessorIndex = tex1It->second;
+				if (texAccessorIndex >= 0 && texAccessorIndex < static_cast<int>(asset.accessors.size())) {
+					texcoords1 = accessor.Read<Vec2>(asset, asset.accessors[texAccessorIndex]);
+				}
+			}
+			std::vector<Vec4> colors;
+			auto colorIt = prim.attributes.find("COLOR_0");
+			if (colorIt != prim.attributes.end()) {
+				int colorAccessorIndex = colorIt->second;
+				if (colorAccessorIndex >= 0 && colorAccessorIndex < static_cast<int>(asset.accessors.size())) {
+					const GLTFAccessor& colorAccessor = asset.accessors[colorAccessorIndex];
+					if (colorAccessor.type == 3) {
+						std::vector<Vec3> rgb = accessor.Read<Vec3>(asset, colorAccessor);
+						colors.reserve(rgb.size());
+						for (const Vec3& c : rgb) {
+							colors.emplace_back(c.x, c.y, c.z, 1.0);
+						}
+					} else {
+						colors = accessor.Read<Vec4>(asset, colorAccessor);
+					}
+				}
+			}
 
 			std::vector<Vec4> tangents4;
 			auto tanIt = prim.attributes.find("TANGENT");
@@ -304,13 +351,23 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				if (i < texcoords.size()) {
 					uv = texcoords[i];
 				}
+				Vec2 uv1 = uv;
+				if (i < texcoords1.size()) {
+					uv1 = texcoords1[i];
+				}
+				Vec4 color{1.0, 1.0, 1.0, 1.0};
+				if (i < colors.size()) {
+					color = colors[i];
+				}
 				Vec3 tangent{};
+				double tangentW = 1.0;
 				if (i < tangents4.size()) {
 					tangent = Vec3{tangents4[i].x, tangents4[i].y, tangents4[i].z};
 					tangent.z = -tangent.z;
+					tangentW = tangents4[i].w;
 				}
 
-				vertices[i] = Vertex{pos, normal, uv, tangent};
+				vertices[i] = Vertex{pos, normal, uv, uv1, color, tangent, tangentW};
 			}
 
 			for (size_t i = 0; i + 2 < indices.size(); i += 3) {
@@ -370,16 +427,25 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				int normalTex = -1;
 				int occlusionTex = -1;
 				int emissiveTex = -1;
+				int transmissionTex = -1;
 				int baseColorImg = -1;
 				int metallicRoughnessImg = -1;
 				int normalImg = -1;
 				int occlusionImg = -1;
 				int emissiveImg = -1;
+				int transmissionImg = -1;
 				int baseColorSampler = -1;
 				int metallicRoughnessSampler = -1;
 				int normalSampler = -1;
 				int occlusionSampler = -1;
 				int emissiveSampler = -1;
+				int transmissionSampler = -1;
+				int baseColorTexCoordSet = 0;
+				int metallicRoughnessTexCoordSet = 0;
+				int normalTexCoordSet = 0;
+				int occlusionTexCoordSet = 0;
+				int emissiveTexCoordSet = 0;
+				int transmissionTexCoordSet = 0;
 				if (prim.materialIndex >= 0 && prim.materialIndex < static_cast<int>(asset.materials.size())) {
 					const GLTFMaterial& gltfMat = asset.materials[prim.materialIndex];
 					baseColorTex = gltfMat.pbr.baseColorTexture.textureIndex;
@@ -387,6 +453,15 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 					normalTex = gltfMat.normalTexture.textureIndex;
 					occlusionTex = gltfMat.occlusionTexture.textureIndex;
 					emissiveTex = gltfMat.emissiveTexture.textureIndex;
+					baseColorTexCoordSet = gltfMat.pbr.baseColorTexture.texCoord;
+					metallicRoughnessTexCoordSet = gltfMat.pbr.metallicRoughnessTexture.texCoord;
+					normalTexCoordSet = gltfMat.normalTexture.texCoord;
+					occlusionTexCoordSet = gltfMat.occlusionTexture.texCoord;
+					emissiveTexCoordSet = gltfMat.emissiveTexture.texCoord;
+					if (gltfMat.transmission.hasTransmission) {
+						transmissionTex = gltfMat.transmission.transmissionTexture.textureIndex;
+						transmissionTexCoordSet = gltfMat.transmission.transmissionTexture.texCoord;
+					}
 				}
 				auto resolveTexture = [&](int textureIndex, int& outImage, int& outSampler) {
 					if (textureIndex < 0 || textureIndex >= static_cast<int>(asset.textures.size())) {
@@ -401,6 +476,7 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				resolveTexture(normalTex, normalImg, normalSampler);
 				resolveTexture(occlusionTex, occlusionImg, occlusionSampler);
 				resolveTexture(emissiveTex, emissiveImg, emissiveSampler);
+				resolveTexture(transmissionTex, transmissionImg, transmissionSampler);
 
 				GPUSceneDrawItem item{};
 				item.mesh = &m_ownedMeshes[meshSlot];
@@ -416,16 +492,25 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				item.normalTextureIndex = normalTex;
 				item.occlusionTextureIndex = occlusionTex;
 				item.emissiveTextureIndex = emissiveTex;
+				item.transmissionTextureIndex = transmissionTex;
 				item.baseColorImageIndex = baseColorImg;
 				item.metallicRoughnessImageIndex = metallicRoughnessImg;
 				item.normalImageIndex = normalImg;
 				item.occlusionImageIndex = occlusionImg;
 				item.emissiveImageIndex = emissiveImg;
+				item.transmissionImageIndex = transmissionImg;
 				item.baseColorSamplerIndex = baseColorSampler;
 				item.metallicRoughnessSamplerIndex = metallicRoughnessSampler;
 				item.normalSamplerIndex = normalSampler;
 				item.occlusionSamplerIndex = occlusionSampler;
 				item.emissiveSamplerIndex = emissiveSampler;
+				item.transmissionSamplerIndex = transmissionSampler;
+				item.baseColorTexCoordSet = baseColorTexCoordSet;
+				item.metallicRoughnessTexCoordSet = metallicRoughnessTexCoordSet;
+				item.normalTexCoordSet = normalTexCoordSet;
+				item.occlusionTexCoordSet = occlusionTexCoordSet;
+				item.emissiveTexCoordSet = emissiveTexCoordSet;
+				item.transmissionTexCoordSet = transmissionTexCoordSet;
 				AddDrawable(item);
 			}
 		}
@@ -471,16 +556,25 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				item.normalTextureIndex = -1;
 				item.occlusionTextureIndex = -1;
 				item.emissiveTextureIndex = -1;
+				item.transmissionTextureIndex = -1;
 				item.baseColorImageIndex = -1;
 				item.metallicRoughnessImageIndex = -1;
 				item.normalImageIndex = -1;
 				item.occlusionImageIndex = -1;
 				item.emissiveImageIndex = -1;
+				item.transmissionImageIndex = -1;
 				item.baseColorSamplerIndex = -1;
 				item.metallicRoughnessSamplerIndex = -1;
 				item.normalSamplerIndex = -1;
 				item.occlusionSamplerIndex = -1;
 				item.emissiveSamplerIndex = -1;
+				item.transmissionSamplerIndex = -1;
+				item.baseColorTexCoordSet = 0;
+				item.metallicRoughnessTexCoordSet = 0;
+				item.normalTexCoordSet = 0;
+				item.occlusionTexCoordSet = 0;
+				item.emissiveTexCoordSet = 0;
+				item.transmissionTexCoordSet = 0;
 				AddDrawable(item);
 			}
 		}

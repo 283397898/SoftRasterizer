@@ -319,6 +319,82 @@ SampledColor SampleGeneric(const FragmentInput& input, int imageIndex, int sampl
     }
 }
 
+SampledColor SampleGenericAtUV(const FragmentInput& input, int imageIndex, int samplerIndex, const Vec2& uv, bool srgb) {
+    if (!input.images || imageIndex < 0 || imageIndex >= static_cast<int>(input.images->size())) {
+        return {};
+    }
+    const GLTFImage& image = (*input.images)[imageIndex];
+    const GLTFSampler* sampler = nullptr;
+    if (input.samplers && samplerIndex >= 0 && samplerIndex < static_cast<int>(input.samplers->size())) {
+        sampler = &(*input.samplers)[samplerIndex];
+    }
+
+    int wrapS = sampler ? sampler->wrapS : 10497;
+    int wrapT = sampler ? sampler->wrapT : 10497;
+    double u = WrapCoord(uv.x, wrapS);
+    double v = WrapCoord(uv.y, wrapT);
+
+    bool useLinear = UseLinearFilter(sampler);
+    bool useSRGB = srgb || image.isSRGB;
+
+    if (useLinear) {
+        double fx = u * (image.width - 1);
+        double fy = (1.0 - v) * (image.height - 1);
+        int x0 = static_cast<int>(fx);
+        int y0 = static_cast<int>(fy);
+        int x1 = std::min(x0 + 1, image.width - 1);
+        int y1 = std::min(y0 + 1, image.height - 1);
+        double tx = fx - x0;
+        double ty = fy - y0;
+
+        auto sample = [&](int x, int y) -> SampledColor {
+            size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
+            if (index + 3 >= image.pixels.size()) return {};
+            const uint8_t* p = image.pixels.data() + index;
+            double r, g, b;
+            if (useSRGB) {
+                r = SRGBToLinearFast(p[0]);
+                g = SRGBToLinearFast(p[1]);
+                b = SRGBToLinearFast(p[2]);
+            } else {
+                r = p[0] / 255.0;
+                g = p[1] / 255.0;
+                b = p[2] / 255.0;
+            }
+            return {Vec3{r, g, b}, p[3] / 255.0};
+        };
+        SampledColor c00 = sample(x0, y0);
+        SampledColor c10 = sample(x1, y0);
+        SampledColor c01 = sample(x0, y1);
+        SampledColor c11 = sample(x1, y1);
+        Vec3 c0 = c00.rgb * (1.0 - tx) + c10.rgb * tx;
+        Vec3 c1 = c01.rgb * (1.0 - tx) + c11.rgb * tx;
+        Vec3 rgb = c0 * (1.0 - ty) + c1 * ty;
+        double a0 = c00.a * (1.0 - tx) + c10.a * tx;
+        double a1 = c01.a * (1.0 - tx) + c11.a * tx;
+        return {rgb, a0 * (1.0 - ty) + a1 * ty};
+    } else {
+        int x = static_cast<int>(u * image.width);
+        int y = static_cast<int>((1.0 - v) * image.height);
+        x = std::max(0, std::min(x, image.width - 1));
+        y = std::max(0, std::min(y, image.height - 1));
+        size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
+        if (index + 3 >= image.pixels.size()) return {};
+        const uint8_t* p = image.pixels.data() + index;
+        double r, g, b;
+        if (useSRGB) {
+            r = SRGBToLinearFast(p[0]);
+            g = SRGBToLinearFast(p[1]);
+            b = SRGBToLinearFast(p[2]);
+        } else {
+            r = p[0] / 255.0;
+            g = p[1] / 255.0;
+            b = p[2] / 255.0;
+        }
+        return {Vec3{r, g, b}, p[3] / 255.0};
+    }
+}
+
 Vec3 TintFromIndex(int index) {
     if (index < 0) {
         return Vec3{1.0, 1.0, 1.0};
@@ -351,22 +427,82 @@ inline double GeometrySmith(double ndotv, double ndotl, double roughness) {
     return ggx1 * ggx2;
 }
 
+// ============================================================================
+// Multi-scatter GGX energy compensation (Kulla-Conty 2017 / Fdez-Agüera 2019)
+// ============================================================================
+
+/**
+ * @brief 近似预积分 DFG 项 (Lazarov 2013 / Karis 2014)
+ * @return (scale, bias)，使得 E_ss ≈ F0 * scale + bias
+ */
+inline Vec2 ApproxDFG(double ndotv, double roughness) {
+    double r_a = 1.0 - roughness;
+    double r_b = roughness * (-0.0275) + 0.0425;
+    double r_c = roughness * (-0.572) + 1.04;
+    double r_d = roughness * 0.022 + (-0.04);
+    double a004 = std::min(r_a * r_a, std::pow(2.0, -9.28 * ndotv)) * r_a + r_b;
+    return Vec2{-1.04 * a004 + r_c, a004 + r_d};
+}
+
+/**
+ * @brief 计算多重散射能量补偿因子
+ * 
+ * 单散射 GGX 在粗糙表面上会丢失能量（光线多次弹射未被计算），
+ * 导致粗糙金属表面过暗。此函数计算补偿因子来恢复丢失的能量。
+ * 
+ * @param F0 基础反射率
+ * @param dfg 预积分 DFG 项 (scale, bias)
+ * @return 每通道的能量补偿乘子
+ */
+inline Vec3 MultiscatterCompensation(const Vec3& F0, const Vec2& dfg) {
+    // E_ss = F0 * scale + bias (单散射方向反照率)
+    double Ess_x = std::max(F0.x * dfg.x + dfg.y, 1e-4);
+    double Ess_y = std::max(F0.y * dfg.x + dfg.y, 1e-4);
+    double Ess_z = std::max(F0.z * dfg.x + dfg.y, 1e-4);
+    // energyCompensation = 1 + F0 * (1/E_ss - 1)
+    return Vec3{
+        1.0 + F0.x * (1.0 / Ess_x - 1.0),
+        1.0 + F0.y * (1.0 / Ess_y - 1.0),
+        1.0 + F0.z * (1.0 / Ess_z - 1.0)
+    };
+}
+
 } // namespace
 
 Vec3 FragmentShader::Shade(const FragmentInput& input) const {
     Vec3 N = input.normal.Normalized();
     Vec3 V = (input.cameraPos - input.worldPos).Normalized();
 
+    // Double-sided: flip normal to face the viewer (glTF spec requirement)
+    if (input.material.doubleSided && Vec3::Dot(N, V) < 0.0) {
+        N = N * -1.0;
+    }
+
     double roughness = std::max(0.04, input.material.roughness);
     double metallic = Saturate(input.material.metallic);
     Vec3 albedo = Clamp01(input.material.albedo);
     double alpha = input.material.alpha;
 
-    SampledColor baseColor = SampleBaseColor(input);
-    albedo = Mul(albedo, baseColor.rgb);
-    alpha *= baseColor.a;
+    SampledColor baseColor{};
+    if (input.baseColorImageIndex >= 0) {
+        Vec2 baseUv = (input.baseColorTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+        baseColor = SampleGenericAtUV(input, input.baseColorImageIndex, input.baseColorSamplerIndex, baseUv, true);
+    }
+    Vec3 vertexColor = Clamp01(Vec3{input.color.x, input.color.y, input.color.z});
+    albedo = Mul(Mul(albedo, baseColor.rgb), vertexColor);
+    alpha *= baseColor.a * Clamp01(input.color.w);
+    if (input.material.transmissionFactor > 0.0 || input.transmissionImageIndex >= 0) {
+        double t = Saturate(input.material.transmissionFactor);
+        if (input.transmissionImageIndex >= 0) {
+            Vec2 tUv = (input.transmissionTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+            SampledColor transmission = SampleGenericAtUV(input, input.transmissionImageIndex, input.transmissionSamplerIndex, tUv, false);
+            t *= transmission.rgb.x;
+        }
+        alpha *= (1.0 - Saturate(t));
+    }
     if (input.metallicRoughnessImageIndex >= 0) {
-        SampledColor mr = SampleGeneric(input, input.metallicRoughnessImageIndex, input.metallicRoughnessSamplerIndex, false);
+        Vec2 mrUv = (input.metallicRoughnessTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+        SampledColor mr = SampleGenericAtUV(input, input.metallicRoughnessImageIndex, input.metallicRoughnessSamplerIndex, mrUv, false);
         metallic = Saturate(metallic * mr.rgb.z);
         roughness = std::max(0.04, mr.rgb.y * roughness);
     }
@@ -374,9 +510,10 @@ Vec3 FragmentShader::Shade(const FragmentInput& input) const {
     if (input.normalImageIndex >= 0) {
         Vec3 T = input.tangent.Normalized();
         if (T.x != 0.0 || T.y != 0.0 || T.z != 0.0) {
-            SampledColor nm = SampleGeneric(input, input.normalImageIndex, input.normalSamplerIndex, false);
+            Vec2 nUv = (input.normalTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+            SampledColor nm = SampleGenericAtUV(input, input.normalImageIndex, input.normalSamplerIndex, nUv, false);
             Vec3 tangentNormal{nm.rgb.x * 2.0 - 1.0, nm.rgb.y * 2.0 - 1.0, nm.rgb.z * 2.0 - 1.0};
-            Vec3 B = Vec3::Cross(N, T).Normalized();
+            Vec3 B = Vec3::Cross(N, T).Normalized() * input.tangentW;
             Vec3 worldNormal{
                 T.x * tangentNormal.x + B.x * tangentNormal.y + N.x * tangentNormal.z,
                 T.y * tangentNormal.x + B.y * tangentNormal.y + N.y * tangentNormal.z,
@@ -390,9 +527,27 @@ Vec3 FragmentShader::Shade(const FragmentInput& input) const {
         albedo = Mul(albedo, TintFromIndex(input.baseColorImageIndex));
     }
 
-    Vec3 F0 = Lerp(Vec3{0.04, 0.04, 0.04}, albedo, metallic);
+    // Compute dielectric F0 from IOR: F0 = ((ior-1)/(ior+1))^2
+    double iorF0 = (input.material.ior - 1.0) / (input.material.ior + 1.0);
+    iorF0 = iorF0 * iorF0;
+    // Apply KHR_materials_specular
+    Vec3 dielectricF0{
+        iorF0 * input.material.specularFactor * input.material.specularColorFactor.x,
+        iorF0 * input.material.specularFactor * input.material.specularColorFactor.y,
+        iorF0 * input.material.specularFactor * input.material.specularColorFactor.z
+    };
+    Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
+
+    // For BLEND mode: premultiply diffuse/ambient by alpha so specular
+    // reflections stay at full Fresnel strength (glass looks reflective).
+    // The rasterizer uses premultiplied blend: result = shaded + bg*(1-alpha)
+    double premulAlpha = (input.material.alphaMode == 2) ? Saturate(alpha) : 1.0;
 
     double ndotv = std::max(0.0, Vec3::Dot(N, V));
+
+    // Multi-scatter GGX energy compensation (Kulla-Conty)
+    Vec2 dfg = ApproxDFG(ndotv, roughness);
+    Vec3 Fms = MultiscatterCompensation(F0, dfg);
 
     Vec3 Lo{0.0, 0.0, 0.0};
 
@@ -412,11 +567,14 @@ Vec3 FragmentShader::Shade(const FragmentInput& input) const {
 
             Vec3 numerator = Mul(F, D * G);
             double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Div(numerator, denom);
+            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
 
             Vec3 kS = F;
             Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
             Vec3 diffuse = Mul(kD, Div(albedo, kPi));
+            if (premulAlpha < 1.0) {
+                diffuse = Mul(diffuse, premulAlpha);
+            }
 
             Vec3 radiance = Mul(light.color, light.intensity);
             Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
@@ -426,16 +584,36 @@ Vec3 FragmentShader::Shade(const FragmentInput& input) const {
         }
     }
 
-    Vec3 ambient = Mul(input.ambientColor, albedo);
+    // === Ambient: split into diffuse + specular (IBL approximation) ===
+    Vec3 kS_env = FresnelSchlick(ndotv, F0);
+    Vec3 kD_env = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS_env), 1.0 - metallic);
+
+    Vec3 ambientDiffuse = Mul(input.ambientColor, Mul(kD_env, albedo));
+    if (premulAlpha < 1.0) {
+        ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
+    }
+
+    double envSmooth = 1.0 - roughness * roughness;
+    Vec3 ambientSpecular = Mul(Mul(kS_env, Fms), input.ambientColor * envSmooth); // 多重散射补偿
+
+    Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
+
     if (input.occlusionImageIndex >= 0) {
-        SampledColor occ = SampleGeneric(input, input.occlusionImageIndex, input.occlusionSamplerIndex, false);
-        ambient = Mul(ambient, occ.rgb.x);
+        Vec2 occUv = (input.occlusionTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+        SampledColor occ = SampleGenericAtUV(input, input.occlusionImageIndex, input.occlusionSamplerIndex, occUv, false);
+        ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
+        ambient = Add(ambientDiffuse, ambientSpecular);
     }
+
     Vec3 color = Add(ambient, Lo);
+    // Emissive: texture * emissiveFactor, or just emissiveFactor if no texture
+    Vec3 emissiveContrib = input.material.emissiveFactor;
     if (input.emissiveImageIndex >= 0) {
-        SampledColor emissive = SampleGeneric(input, input.emissiveImageIndex, input.emissiveSamplerIndex, true);
-        color = Add(color, emissive.rgb);
+        Vec2 emUv = (input.emissiveTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
+        SampledColor emissive = SampleGenericAtUV(input, input.emissiveImageIndex, input.emissiveSamplerIndex, emUv, true);
+        emissiveContrib = Mul(emissive.rgb, input.material.emissiveFactor);
     }
+    color = Add(color, emissiveContrib);
 
     return color;
 }
@@ -553,7 +731,7 @@ SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
 /**
  * @brief 高性能片元着色实现
  */
-Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying& varying) const {
+Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying& varying, double* outEffectiveAlpha) const {
     // Inline normalize for N (avoid function call overhead)
     Vec3 N = varying.normal;
     double nLenSq = N.x * N.x + N.y * N.y + N.z * N.z;
@@ -572,21 +750,49 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         V.x *= invVLen; V.y *= invVLen; V.z *= invVLen;
     }
 
+    // Double-sided: flip normal to face the viewer (glTF spec requirement)
+    if (ctx.material->doubleSided) {
+        double ndotv_raw = N.x * V.x + N.y * V.y + N.z * V.z;
+        if (ndotv_raw < 0.0) {
+            N.x = -N.x; N.y = -N.y; N.z = -N.z;
+        }
+    }
+
     double roughness = std::max(0.04, ctx.material->roughness);
     double metallic = Saturate(ctx.material->metallic);
     Vec3 albedo = Clamp01(ctx.material->albedo);
 
     // Sample base color texture
+    double alpha = ctx.material->alpha;
     if (ctx.baseColorImageIndex >= 0) {
+        Vec2 baseUv = (ctx.baseColorTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor baseColor = SampleImageFast(ctx.images, ctx.samplers, 
-            ctx.baseColorImageIndex, ctx.baseColorSamplerIndex, varying.texCoord, true);
-        albedo = Mul(albedo, baseColor.rgb);
+            ctx.baseColorImageIndex, ctx.baseColorSamplerIndex, baseUv, true);
+        Vec3 vertexColor = Clamp01(Vec3{varying.color.x, varying.color.y, varying.color.z});
+        albedo = Mul(Mul(albedo, baseColor.rgb), vertexColor);
+        alpha *= baseColor.a * Clamp01(varying.color.w);
+    }
+    if (ctx.baseColorImageIndex < 0) {
+        Vec3 vertexColor = Clamp01(Vec3{varying.color.x, varying.color.y, varying.color.z});
+        albedo = Mul(albedo, vertexColor);
+        alpha *= Clamp01(varying.color.w);
+    }
+    if (ctx.material->transmissionFactor > 0.0 || ctx.transmissionImageIndex >= 0) {
+        double t = Saturate(ctx.material->transmissionFactor);
+        if (ctx.transmissionImageIndex >= 0) {
+            Vec2 tUv = (ctx.transmissionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+            SampledColor transmission = SampleImageFast(ctx.images, ctx.samplers,
+                ctx.transmissionImageIndex, ctx.transmissionSamplerIndex, tUv, false);
+            t *= transmission.rgb.x;
+        }
+        alpha *= (1.0 - Saturate(t));
     }
     
     // Sample metallic-roughness texture
     if (ctx.metallicRoughnessImageIndex >= 0) {
+        Vec2 mrUv = (ctx.metallicRoughnessTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor mr = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.metallicRoughnessImageIndex, ctx.metallicRoughnessSamplerIndex, varying.texCoord, false);
+            ctx.metallicRoughnessImageIndex, ctx.metallicRoughnessSamplerIndex, mrUv, false);
         metallic = Saturate(metallic * mr.rgb.z);
         roughness = std::max(0.04, mr.rgb.y * roughness);
     }
@@ -600,15 +806,16 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
             double invTLen = 1.0 / std::sqrt(tLenSq);
             T.x *= invTLen; T.y *= invTLen; T.z *= invTLen;
             
+            Vec2 nUv = (ctx.normalTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
             SampledColor nm = SampleImageFast(ctx.images, ctx.samplers,
-                ctx.normalImageIndex, ctx.normalSamplerIndex, varying.texCoord, false);
+                ctx.normalImageIndex, ctx.normalSamplerIndex, nUv, false);
             Vec3 tangentNormal{nm.rgb.x * 2.0 - 1.0, nm.rgb.y * 2.0 - 1.0, nm.rgb.z * 2.0 - 1.0};
             
-            // Inline Cross and normalize for B
+            // Inline Cross and normalize for B, then multiply by tangentW for handedness
             Vec3 B{N.y * T.z - N.z * T.y, N.z * T.x - N.x * T.z, N.x * T.y - N.y * T.x};
             double bLenSq = B.x * B.x + B.y * B.y + B.z * B.z;
             if (bLenSq > 1e-12) {
-                double invBLen = 1.0 / std::sqrt(bLenSq);
+                double invBLen = ctx.tangentW / std::sqrt(bLenSq);
                 B.x *= invBLen; B.y *= invBLen; B.z *= invBLen;
             }
             
@@ -629,8 +836,27 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
     }
 
-    Vec3 F0 = Lerp(Vec3{0.04, 0.04, 0.04}, albedo, metallic);
+    // Compute dielectric F0 from IOR: F0 = ((ior-1)/(ior+1))^2
+    double iorF0 = (ctx.material->ior - 1.0) / (ctx.material->ior + 1.0);
+    iorF0 = iorF0 * iorF0;
+    // Apply KHR_materials_specular
+    Vec3 dielectricF0{
+        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.x,
+        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.y,
+        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.z
+    };
+    Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
+
+    // For BLEND mode: premultiply diffuse/ambient by alpha so specular
+    // reflections stay at full Fresnel strength (glass looks reflective).
+    // The rasterizer uses premultiplied blend: result = shaded + bg*(1-alpha)
+    double premulAlpha = (ctx.material->alphaMode == 2) ? Saturate(alpha) : 1.0;
+
     double ndotv = std::max(0.0, Vec3::Dot(N, V));
+
+    // Multi-scatter GGX energy compensation (Kulla-Conty)
+    Vec2 dfg = ApproxDFG(ndotv, roughness);
+    Vec3 Fms = MultiscatterCompensation(F0, dfg);
 
     Vec3 Lo{0.0, 0.0, 0.0};
 
@@ -662,11 +888,14 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
 
             Vec3 numerator = Mul(F, D * G);
             double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Div(numerator, denom);
+            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
 
             Vec3 kS = F;
             Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
             Vec3 diffuse = Mul(kD, Div(albedo, kPi));
+            if (premulAlpha < 1.0) {
+                diffuse = Mul(diffuse, premulAlpha);
+            }
 
             Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
             contrib = Mul(contrib, pl.radiance);  // Use precomputed radiance
@@ -689,11 +918,14 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
 
             Vec3 numerator = Mul(F, D * G);
             double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Div(numerator, denom);
+            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
 
             Vec3 kS = F;
             Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
             Vec3 diffuse = Mul(kD, Div(albedo, kPi));
+            if (premulAlpha < 1.0) {
+                diffuse = Mul(diffuse, premulAlpha);
+            }
 
             Vec3 radiance = Mul(light.color, light.intensity);
             Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
@@ -703,17 +935,51 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
     }
 
-    Vec3 ambient = Mul(ctx.ambientColor, albedo);
-    if (ctx.occlusionImageIndex >= 0) {
-        SampledColor occ = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.occlusionImageIndex, ctx.occlusionSamplerIndex, varying.texCoord, false);
-        ambient = Mul(ambient, occ.rgb.x);
+    // === Ambient: split into diffuse + specular (IBL approximation) ===
+    // Environment Fresnel at view angle (for ambient specular)
+    Vec3 kS_env = FresnelSchlick(ndotv, F0);
+    Vec3 kD_env = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS_env), 1.0 - metallic);
+
+    // Diffuse ambient
+    Vec3 ambientDiffuse = Mul(ctx.ambientColor, Mul(kD_env, albedo));
+    if (premulAlpha < 1.0) {
+        ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
     }
+
+    // Specular ambient: Fresnel-weighted environment reflection approximation.
+    // Rougher surfaces blur the environment, reducing apparent reflection.
+    // NOT premultiplied by alpha — surface reflection is visible even on glass.
+    double envSmooth = 1.0 - roughness * roughness;
+    Vec3 ambientSpecular = Mul(Mul(kS_env, Fms), ctx.ambientColor * envSmooth); // 多重散射补偿
+
+    Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
+
+    if (ctx.occlusionImageIndex >= 0) {
+        Vec2 occUv = (ctx.occlusionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+        SampledColor occ = SampleImageFast(ctx.images, ctx.samplers,
+            ctx.occlusionImageIndex, ctx.occlusionSamplerIndex, occUv, false);
+        // Apply occlusion to diffuse ambient only (specular ambient represents
+        // environment reflection which is less affected by local occlusion)
+        ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
+        ambient = Add(ambientDiffuse, ambientSpecular);
+    }
+
     Vec3 color = Add(ambient, Lo);
+
+    // Emissive: texture * emissiveFactor, or just emissiveFactor if no texture
+    Vec3 emissiveContrib = ctx.material->emissiveFactor;
     if (ctx.emissiveImageIndex >= 0) {
+        Vec2 emUv = (ctx.emissiveTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor emissive = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.emissiveImageIndex, ctx.emissiveSamplerIndex, varying.texCoord, true);
-        color = Add(color, emissive.rgb);
+            ctx.emissiveImageIndex, ctx.emissiveSamplerIndex, emUv, true);
+        emissiveContrib = Mul(emissive.rgb, ctx.material->emissiveFactor);
+    }
+    color = Add(color, emissiveContrib);
+
+    // Output alpha unchanged (Fresnel reflection is handled via premultiplied
+    // specular in the shaded color; the blend alpha stays as material alpha).
+    if (outEffectiveAlpha) {
+        *outEffectiveAlpha = alpha;
     }
 
     return color;

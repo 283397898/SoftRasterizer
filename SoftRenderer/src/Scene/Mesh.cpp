@@ -273,7 +273,8 @@ Mesh Mesh::CreateSphere(double radius, int segments, int rings) {
                 cosTheta
             };
 
-            vertices.push_back(Vertex{position, normal, Vec2{u, v}, tangent});
+            Vec2 uv{u, v};
+            vertices.push_back(Vertex{position, normal, uv, uv, Vec4{1.0, 1.0, 1.0, 1.0}, tangent});
         }
     }
 
@@ -319,10 +320,14 @@ Mesh Mesh::CreateCube(double size) {
     auto addFace = [&](const Vec3& v0, const Vec3& v1, const Vec3& v2, const Vec3& v3) {
         uint32_t base = static_cast<uint32_t>(vertices.size());
 
-        vertices.push_back(Vertex{v0, Vec3{}, Vec2{0.0, 0.0}, Vec3{}});
-        vertices.push_back(Vertex{v1, Vec3{}, Vec2{1.0, 0.0}, Vec3{}});
-        vertices.push_back(Vertex{v2, Vec3{}, Vec2{0.0, 1.0}, Vec3{}});
-        vertices.push_back(Vertex{v3, Vec3{}, Vec2{1.0, 1.0}, Vec3{}});
+        Vec2 uv0{0.0, 0.0};
+        Vec2 uv1{1.0, 0.0};
+        Vec2 uv2{0.0, 1.0};
+        Vec2 uv3{1.0, 1.0};
+        vertices.push_back(Vertex{v0, Vec3{}, uv0, uv0, Vec4{1.0, 1.0, 1.0, 1.0}, Vec3{}});
+        vertices.push_back(Vertex{v1, Vec3{}, uv1, uv1, Vec4{1.0, 1.0, 1.0, 1.0}, Vec3{}});
+        vertices.push_back(Vertex{v2, Vec3{}, uv2, uv2, Vec4{1.0, 1.0, 1.0, 1.0}, Vec3{}});
+        vertices.push_back(Vertex{v3, Vec3{}, uv3, uv3, Vec4{1.0, 1.0, 1.0, 1.0}, Vec3{}});
 
         indices.push_back(base + 0);
         indices.push_back(base + 2);
