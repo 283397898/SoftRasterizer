@@ -182,8 +182,8 @@ void CRenderView::Initialize(int width, int height) {
     m_objects.Clear();
     m_hasGLB = false;
     GLTFLoader loader;
-    // 自动加载桌面上的测试模型 (mazda mx-5)
-    GLTFAsset asset = loader.LoadGLB("C:\\Users\\isis\\Desktop\\2019_mazda_mx-5.glb");
+    // 自动加载桌面上的测试模型 (earth)
+    GLTFAsset asset = loader.LoadGLB("../example/earth.glb");
     if (!asset.meshes.empty()) {
         m_gpuScene.Build(asset, -1);
         m_hasGLB = !m_gpuScene.GetItems().empty();
