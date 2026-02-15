@@ -95,6 +95,7 @@ void Renderer::Render(const Scene& scene) {
 
     FrameContextBuilder frameContextBuilder;
     FrameContext frameContext = frameContextBuilder.Build(scene, m_width, m_height, m_config.frameContext);
+    frameContext.environmentMap = m_config.environmentMap;
     auto setupEnd = Clock::now();
 
     RenderQueue renderQueue;
@@ -154,6 +155,7 @@ void Renderer::Render(const GPUScene& scene) {
     double aspect = (m_height > 0) ? (static_cast<double>(m_width) / static_cast<double>(m_height)) : 1.0;
     frameContext.projection = Mat4::Perspective(options.fovYRadians, aspect, options.zNear, options.zFar);
     frameContext.ambientColor = options.ambientColor;
+    frameContext.environmentMap = m_config.environmentMap;
     frameContext.images = &scene.GetImages();
     frameContext.samplers = &scene.GetSamplers();
     DirectionalLight defaultLight;

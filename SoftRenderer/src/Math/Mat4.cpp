@@ -156,4 +156,52 @@ Mat4 Mat4::operator*(const Mat4& rhs) const {
     return result;
 }
 
+/**
+ * @brief 4x4 矩阵求逆（伴随矩阵法 / Cramer's rule）
+ */
+Mat4 Mat4::Inverse() const {
+    // 展开 2x2 行列式的中间项
+    double s0 = m[0][0] * m[1][1] - m[1][0] * m[0][1];
+    double s1 = m[0][0] * m[1][2] - m[1][0] * m[0][2];
+    double s2 = m[0][0] * m[1][3] - m[1][0] * m[0][3];
+    double s3 = m[0][1] * m[1][2] - m[1][1] * m[0][2];
+    double s4 = m[0][1] * m[1][3] - m[1][1] * m[0][3];
+    double s5 = m[0][2] * m[1][3] - m[1][2] * m[0][3];
+
+    double c5 = m[2][2] * m[3][3] - m[3][2] * m[2][3];
+    double c4 = m[2][1] * m[3][3] - m[3][1] * m[2][3];
+    double c3 = m[2][1] * m[3][2] - m[3][1] * m[2][2];
+    double c2 = m[2][0] * m[3][3] - m[3][0] * m[2][3];
+    double c1 = m[2][0] * m[3][2] - m[3][0] * m[2][2];
+    double c0 = m[2][0] * m[3][1] - m[3][0] * m[2][1];
+
+    double det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+    if (det == 0.0) return Identity(); // 奇异矩阵回退
+
+    double invDet = 1.0 / det;
+
+    Mat4 inv;
+    inv.m[0][0] = ( m[1][1] * c5 - m[1][2] * c4 + m[1][3] * c3) * invDet;
+    inv.m[0][1] = (-m[0][1] * c5 + m[0][2] * c4 - m[0][3] * c3) * invDet;
+    inv.m[0][2] = ( m[3][1] * s5 - m[3][2] * s4 + m[3][3] * s3) * invDet;
+    inv.m[0][3] = (-m[2][1] * s5 + m[2][2] * s4 - m[2][3] * s3) * invDet;
+
+    inv.m[1][0] = (-m[1][0] * c5 + m[1][2] * c2 - m[1][3] * c1) * invDet;
+    inv.m[1][1] = ( m[0][0] * c5 - m[0][2] * c2 + m[0][3] * c1) * invDet;
+    inv.m[1][2] = (-m[3][0] * s5 + m[3][2] * s2 - m[3][3] * s1) * invDet;
+    inv.m[1][3] = ( m[2][0] * s5 - m[2][2] * s2 + m[2][3] * s1) * invDet;
+
+    inv.m[2][0] = ( m[1][0] * c4 - m[1][1] * c2 + m[1][3] * c0) * invDet;
+    inv.m[2][1] = (-m[0][0] * c4 + m[0][1] * c2 - m[0][3] * c0) * invDet;
+    inv.m[2][2] = ( m[3][0] * s4 - m[3][1] * s2 + m[3][3] * s0) * invDet;
+    inv.m[2][3] = (-m[2][0] * s4 + m[2][1] * s2 - m[2][3] * s0) * invDet;
+
+    inv.m[3][0] = (-m[1][0] * c3 + m[1][1] * c1 - m[1][2] * c0) * invDet;
+    inv.m[3][1] = ( m[0][0] * c3 - m[0][1] * c1 + m[0][2] * c0) * invDet;
+    inv.m[3][2] = (-m[3][0] * s3 + m[3][1] * s1 - m[3][2] * s0) * invDet;
+    inv.m[3][3] = ( m[2][0] * s3 - m[2][1] * s1 + m[2][2] * s0) * invDet;
+
+    return inv;
+}
+
 } // namespace SR

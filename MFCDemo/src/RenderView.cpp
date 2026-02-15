@@ -183,7 +183,7 @@ void CRenderView::Initialize(int width, int height) {
     m_hasGLB = false;
     GLTFLoader loader;
     // 自动加载桌面上的测试模型 (earth)
-    GLTFAsset asset = loader.LoadGLB("../example/earth.glb");
+    GLTFAsset asset = loader.LoadGLB("example/2019_mazda_mx-5.glb");
     if (!asset.meshes.empty()) {
         m_gpuScene.Build(asset, -1);
         m_hasGLB = !m_gpuScene.GetItems().empty();
@@ -251,6 +251,16 @@ void CRenderView::Initialize(int width, int height) {
     m_scene.SetLightGroup(&m_lights);
 
     m_scene.SetCamera(&m_camera);
+
+    // 加载 IBL 环境贴图（EXR）
+    if (m_envMap.LoadFromEXR("example/german_town_street_4k.exr")) {
+        RendererConfig config = m_renderer.GetConfig();
+        config.environmentMap = &m_envMap;
+        m_renderer.SetConfig(config);
+        OutputDebugStringA("RenderView: environment map loaded\n");
+    } else {
+        OutputDebugStringA(("RenderView: failed to load env map: " + m_envMap.GetLastError() + "\n").c_str());
+    }
 
     if (m_hasGLB) {
         ExportMaterialDebugFrames(asset);

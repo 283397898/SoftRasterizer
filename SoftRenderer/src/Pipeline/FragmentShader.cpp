@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "Asset/GLTFTypes.h"
+#include "Pipeline/EnvironmentMap.h"
 
 namespace SR {
 
@@ -935,22 +936,44 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
     }
 
-    // === Ambient: split into diffuse + specular (IBL approximation) ===
-    // Environment Fresnel at view angle (for ambient specular)
+    // === Ambient: split into diffuse + specular ===
+    // 如果有环境贴图则使用 IBL (Image-Based Lighting)，否则回退到常量环境光
     Vec3 kS_env = FresnelSchlick(ndotv, F0);
     Vec3 kD_env = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS_env), 1.0 - metallic);
 
-    // Diffuse ambient
-    Vec3 ambientDiffuse = Mul(ctx.ambientColor, Mul(kD_env, albedo));
-    if (premulAlpha < 1.0) {
-        ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
-    }
+    Vec3 ambientDiffuse;
+    Vec3 ambientSpecular;
 
-    // Specular ambient: Fresnel-weighted environment reflection approximation.
-    // Rougher surfaces blur the environment, reducing apparent reflection.
-    // NOT premultiplied by alpha — surface reflection is visible even on glass.
-    double envSmooth = 1.0 - roughness * roughness;
-    Vec3 ambientSpecular = Mul(Mul(kS_env, Fms), ctx.ambientColor * envSmooth); // 多重散射补偿
+    if (ctx.environmentMap) {
+        // --- IBL 路径 (Split-Sum) ---
+        // 漫反射：SH 辐照度
+        Vec3 irradiance = ctx.environmentMap->EvalDiffuseSH(N);
+        ambientDiffuse = Mul(Mul(kD_env, albedo), Div(irradiance, kPi));
+        if (premulAlpha < 1.0) {
+            ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
+        }
+
+        // 镜面反射：预过滤贴图 + BRDF LUT
+        Vec3 R{2.0 * ndotv * N.x - V.x, 2.0 * ndotv * N.y - V.y, 2.0 * ndotv * N.z - V.z};
+        double rLen = std::sqrt(R.x * R.x + R.y * R.y + R.z * R.z);
+        if (rLen > 1e-12) { double inv = 1.0 / rLen; R.x *= inv; R.y *= inv; R.z *= inv; }
+        Vec3 prefilteredColor = ctx.environmentMap->SampleSpecular(R, roughness);
+        Vec2 brdf = ctx.environmentMap->LookupBRDF(ndotv, roughness);
+        // specular = prefilteredColor * (F0 * scale + bias) * Fms
+        ambientSpecular = Vec3{
+            prefilteredColor.x * (F0.x * brdf.x + brdf.y) * Fms.x,
+            prefilteredColor.y * (F0.y * brdf.x + brdf.y) * Fms.y,
+            prefilteredColor.z * (F0.z * brdf.x + brdf.y) * Fms.z
+        };
+    } else {
+        // --- 回退：常量环境光 ---
+        ambientDiffuse = Mul(ctx.ambientColor, Mul(kD_env, albedo));
+        if (premulAlpha < 1.0) {
+            ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
+        }
+        double envSmooth = 1.0 - roughness * roughness;
+        ambientSpecular = Mul(Mul(kS_env, Fms), ctx.ambientColor * envSmooth);
+    }
 
     Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
 
@@ -958,8 +981,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         Vec2 occUv = (ctx.occlusionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor occ = SampleImageFast(ctx.images, ctx.samplers,
             ctx.occlusionImageIndex, ctx.occlusionSamplerIndex, occUv, false);
-        // Apply occlusion to diffuse ambient only (specular ambient represents
-        // environment reflection which is less affected by local occlusion)
+        // 仅对漫反射环境光应用 AO（镜面反射不受局部遮蔽影响）
         ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
         ambient = Add(ambientDiffuse, ambientSpecular);
     }

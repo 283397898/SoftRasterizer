@@ -11,9 +11,10 @@
 ## 项目亮点
 
 - **零第三方依赖**：摒弃现成数学、图像及模型加载库，核心算法完全手写。
-- **现代化 C++**：基于 C++20 标准，利用 OpenMP 实现清屏、后处理及光栅化主循环的多核并行。
+- **现代化 C++**：基于 C++20 标准，利用 OpenMP 实现**全管线多核并行**——从几何处理、裁剪、Binning 到光栅化主循环及后处理，几乎无串行瓶颈。
 - **DirectX 风格管线**：采用左手坐标系，NDC 深度 $[0,1]$，近平面 $z\ge 0$。
 - **完整 PBR 渲染**：实现 Cook-Torrance BRDF (GGX + Smith + Fresnel-Schlick)。
+- **IBL 环境光照**：手写 EXR 解码器 + Split-Sum 预过滤镜面反射 + SH9 漫反射辐照度 + 天空盒背景。
 - **原生 HDR 支持**：内部采用线性 HDR 缓冲，支持 Tone Mapping 及 sRGB 转换（含 LUT 加速与抖动处理）。
 - **D3D12 显示后端**：Demo 使用 D3D12 仅作 Present 用途，将 CPU 线性像素上传至 `R16G16B16A16_FLOAT` 后台缓冲实现 HDR 输出。
 
@@ -25,11 +26,12 @@
 Scene / GPUScene
   -> RenderQueueBuilder / GPUSceneRenderQueueBuilder (扁平化 + 排序)
   -> RenderPipeline
-        1) GeometryProcessor: 顶点变换 + 三角形装配
-        2) Clipper: Sutherland-Hodgman 视锥裁剪（齐次裁剪空间）
-        3) Rasterizer: tile-based + SIMD + early-z + 透视校正插值
-        4) FragmentShader: PBR 着色（含纹理采样、法线贴图、AO、Emissive）
-        5) PostProcess: FXAA + ToneMap/ResolveToSRGB
+        1) GeometryProcessor: 顶点变换 + 三角形装配       [OMP 多 DrawItem 并行]
+        2) Clipper: Sutherland-Hodgman 视锥裁剪           [OMP 每线程独立 Clipper 并行]
+        3) Rasterizer: tile-based + SIMD + early-z        [OMP Binning 并行 + Tile 并行]
+           └─ 不透明 → 天空盒(IBL) → 透明混合            [正确的渲染顺序]
+        4) FragmentShader: PBR + IBL 着色                 [Tile 内逐像素着色]
+        5) PostProcess: FXAA + ToneMap/ResolveToSRGB      [OMP 并行]
   -> Present (SDR: GDI/窗口输出, HDR: D3D12 HDRPresenter)
 ```
 
@@ -38,10 +40,11 @@ Scene / GPUScene
 - `RenderPipeline`：`SoftRenderer/src/Render/RenderPipeline.cpp`
 - `Rasterizer`：`SoftRenderer/src/Pipeline/Rasterizer.cpp`
 - `FragmentShader`：`SoftRenderer/src/Pipeline/FragmentShader.cpp`
+- `EnvironmentMap`：`SoftRenderer/src/Pipeline/EnvironmentMap.cpp`
 - `Framebuffer`：`SoftRenderer/src/Core/Framebuffer.cpp`
 - `HDRPresenter`：`MFCDemo/src/HDRPresenter.cpp`
 
-## 关键算法与“硬核点”展开
+## 关键算法与"硬核点"展开
 
 ### 1) 齐次裁剪：Sutherland-Hodgman（DirectX 风格）
 
@@ -63,12 +66,12 @@ Scene / GPUScene
 设三角形屏幕空间重心坐标为 $b_0,b_1,b_2$，每个顶点齐次坐标的 $w$ 为 $w_0,w_1,w_2$，属性为 $a$，则：
 
 $$
-	ilde a = \frac{b_0\,a_0/w_0 + b_1\,a_1/w_1 + b_2\,a_2/w_2}{b_0\,1/w_0 + b_1\,1/w_1 + b_2\,1/w_2}
+\tilde a = \frac{b_0\,a_0/w_0 + b_1\,a_1/w_1 + b_2\,a_2/w_2}{b_0\,1/w_0 + b_1\,1/w_1 + b_2\,1/w_2}
 $$
 
-这一步是“纹理不拉伸、法线不跑偏”的根本保证。
+这一步是"纹理不拉伸、法线不跑偏"的根本保证。
 
-### 3) 光栅化：Tile-Based + 早深度 + AVX2 SIMD
+### 3) 光栅化：全管线并行 + Tile-Based + 早深度 + AVX2 SIMD
 
 光栅化通常是软渲染的性能瓶颈，本项目为此集成了多项 CPU 关键优化技术：
 
@@ -76,20 +79,25 @@ $$
     - 先将三角形 binning 到覆盖的 tile（避免跨线程写同一像素导致锁/原子）。
     - 每个 tile 内按三角形 `zMin` 排序（前到后），为 early-z 提供更高命中率。
 
-2. **Tile 粗粒度深度信息**
-    - 预扫 tile 区域的最大深度（可视为一个轻量级的 coarse depth pass），为后续“越早越好”的裁剪/跳过提供条件。
+2. **全管线 OpenMP 并行化（从帧头到帧尾几乎无串行瓶颈）**
+    - **几何阶段**：多 DrawItem 并行处理，每线程独立 `GeometryProcessor` + 本地三角形列表，结束后 move 合并。
+    - **裁剪阶段**：每线程独立 `Clipper` 实例 + 本地 `RasterTriangle` 向量，完全无锁并行裁剪。
+    - **Binning 计数**：每线程独立直方图，`omp critical` 归约合并。
+    - **Binning 填充**：`_InterlockedExchangeAdd64` 原子写游标，各线程并行填充索引。
+    - **Tile 光栅化**：`schedule(dynamic, 1)` 动态分配 tile，每线程独立 `FragmentShader` 实例。
+    - **清除/后处理**：DepthBuffer、Framebuffer 清除及 FXAA、ToneMap 均为 OpenMP 并行。
 
 3. **早深度测试（Early-Z）**
     - 在昂贵的插值与 PBR 着色之前先做 `depth` 比较：不通过就直接跳过，避免白算。
 
 4. **SIMD 路径（AVX2，4 像素一组）**
     - 使用 `__m256d` 处理 4 个像素的边函数与重心坐标，批量算 depth、invW、插值因子。
-    - 标量路径只负责“尾巴像素”，减少分支与杂音。
+    - 标量路径只负责"尾巴像素"，减少分支与杂音。
 
 5. **写入路径极简化**
     - 直接拿到 `Framebuffer` 线性 HDR 缓冲的可写指针与 `DepthBuffer` 原始指针，减少函数调用与边界检查开销。
 
-简而言之，这是一个架构优良、“CPU 友好”的软件光栅化器，而非低效的简单像素循环。
+简而言之，这是一个从帧头到帧尾**几乎无串行瓶颈**的 CPU 光栅化器，而非低效的简单像素循环。
 
 ### 4) 片元着色：Cook-Torrance PBR（并带有 fast path）
 
@@ -113,13 +121,51 @@ $$
 - Occlusion（AO）
 - Emissive（可 sRGB 解码）
 
-为了更贴近“真实渲染器”的性能路径，项目提供了优化版本 `ShadeFast`：
+为了更贴近"真实渲染器"的性能路径，项目提供了优化版本 `ShadeFast`：
 
 - **把三角形级常量（Context）与像素级变量（Varying）拆分**，避免每像素重复搬运。
 - **每帧预计算光源数据**（光向量 `L`、radiance），在 tile/work-item 内复用。
 - **关键向量归一化、半程向量 H 的构造尽量 inline**，减少函数调用开销。
 
-### 5) 后处理：FXAA + ResolveToSRGB（并行 + LUT）
+### 5) IBL：Image-Based Lighting（Split-Sum + SH9）
+
+本项目实现了完整的基于图像的光照（IBL），为 PBR 材质提供真实的环境反射与漫反射。
+
+**架构概览**：
+
+```
+EXR 文件 → EXRDecoder → HDRImage
+  → EnvironmentMap 预计算:
+      1) SH9 漫反射辐照度 (Spherical Harmonics L=2, 9 系数)     [OMP 并行]
+      2) Split-Sum 镜面反射预过滤 (6 mip, GGX 重要性采样)       [OMP 并行]
+      3) BRDF LUT (128×128, 积分 F₀ scale + bias)              [OMP 并行]
+  → 运行时:
+      漫反射: EvalDiffuseSH(N) → 9 个基函数加权求和
+      镜面反射: SampleSpecular(R, roughness) + LookupBRDF(NdotV, roughness)
+```
+
+**关键实现细节**：
+
+1. **EXR 解码器（零依赖手写）**
+    - 支持 Scanline 格式，NONE / ZIP / ZIPS 压缩。
+    - 手写 zlib inflate（fixed + dynamic Huffman），复用 PNG 解码器的实现。
+    - 正确还原 OpenEXR 的 delta predictor（**含 +128 偏移**）和字节交织（even/odd split）。
+    - 支持 HALF（fp16）和 FLOAT（fp32）像素类型，自动提取 R/G/B 通道。
+
+2. **漫反射：球谐函数 L=2（9 个系数）**
+    - 遍历环境贴图所有像素，投影到 9 个 SH 基函数，每通道独立积分。
+    - 运行时只需 9 次乘加即可得到任意法线方向的辐照度——比逐像素采样快几个数量级。
+
+3. **镜面反射：Split-Sum 预过滤**
+    - 对 6 个粗糙度等级（0.0 ~ 1.0）生成预过滤 mip 链。
+    - 每个 mip 使用 **GGX 重要性采样**（Hammersley 低差异序列 + ImportanceSampleGGX）。
+    - BRDF LUT 128×128 预积分 $\int F_0\,\text{scale} + \text{bias}$，运行时查表即可。
+
+4. **天空盒渲染**
+    - 通过逆 VP 矩阵从 NDC 还原世界空间射线方向，对 `depth == 1.0` 的远平面像素采样环境贴图。
+    - 渲染顺序：**不透明几何 → 天空盒 → 透明几何**，确保透明物体正确混合在天空盒之上。
+
+### 6) 后处理：FXAA + ResolveToSRGB（并行 + LUT）
 
 1. **FXAA（Fast Approximate Anti-Aliasing）**
     - 基于亮度梯度估计边缘方向，沿边缘方向采样并重建颜色。
@@ -131,7 +177,7 @@ $$
     - 支持轻量抖动模式（Bayer 风格 2x2 模式），用于减轻 banding。
     - OpenMP 并行遍历像素，适合大分辨率。
 
-### 6) HDR 输出：使用 D3D12 作为显示后端
+### 7) HDR 输出：使用 D3D12 作为显示后端
 
 `MFCDemo` 的 HDR 路径并非将渲染任务卸载至 GPU，而是：
 
@@ -142,7 +188,7 @@ $$
 
 这条链路的核心价值是：**渲染完全在 CPU**，但依然可以走 HDR 显示链路。
 
-### 7) Asset：零依赖 glTF/GLB + BufferAccessor + PNG/JPEG
+### 8) Asset：零依赖 glTF/GLB + BufferAccessor + PNG/JPEG/EXR
 
 若仅实现渲染逻辑而缺失资产加载能力，项目往往局限于简单的几何体演示。本项目的 Asset 层旨在：
 **在完全不引入第三方库的前提下**，将 glTF 2.0（含 GLB 容器）解析为 `GLTFAsset`，并转换为 Runtime 层的 `GPUScene`。
@@ -167,8 +213,15 @@ $$
     - JPEG：基线 JPEG 解码路径（量化表 + Huffman 表 + MCU 扫描），解码后做 IDCT 8x8，最后 YCbCr -> RGB。
     - 统一入口按 `mimeType` 分发，`mimeType` 为空时可通过文件签名自动识别 PNG/JPEG。
 
-4. **GLTFLoader：LoadGLTF + LoadGLB（含 data URI / BIN chunk）**
-    - GLB：校验 magic/version/length，遍历 chunk（JSON/BIN），支持 “JSON chunk + BIN chunk”。
+4. **EXRDecoder：HDR 环境贴图加载（手写 ZIP/ZIPS 解压）**
+    - 解析 OpenEXR header（magic/version/channels/compression/dataWindow）。
+    - 支持 NONE、ZIP（16 行/块）、ZIPS（1 行/块）三种压缩模式。
+    - 手写 zlib inflate + OpenEXR delta predictor（含 +128 偏移）+ 字节交织还原。
+    - 支持 HALF（fp16 → float 转换）和 FLOAT（fp32）像素类型。
+    - 按字母序通道排列中自动定位 R/G/B 通道，输出为 `HDRImage`（float RGB）。
+
+5. **GLTFLoader：LoadGLTF + LoadGLB（含 data URI / BIN chunk）**
+    - GLB：校验 magic/version/length，遍历 chunk（JSON/BIN），支持 "JSON chunk + BIN chunk"。
     - glTF：读取 JSON 文本，基于 `basePath` 解析外部资源。
     - 支持 buffer：`uri` 外链文件 / `data:` URI（base64）/ GLB 的 BIN chunk。
     - 支持 image：`uri` 外链 / `data:` URI / `bufferView` 内嵌，并调用 `ImageDecoder` 解码。
@@ -180,6 +233,7 @@ $$
 - `JSONParser`：`SoftRenderer/src/Asset/JSONParser.cpp`
 - `BufferAccessor`：`SoftRenderer/include/Asset/BufferAccessor.inl`
 - `ImageDecoder`：`SoftRenderer/src/Asset/ImageDecoder.cpp`
+- `EXRDecoder`：`SoftRenderer/src/Asset/EXRDecoder.cpp`
 - `GLTFLoader`：`SoftRenderer/src/Asset/GLTFLoader.cpp`
 
 ## 数值与坐标系约定
@@ -223,7 +277,7 @@ cmake --build build --config Release
 
 ```mermaid
 graph TD
-     A[Asset: glTF/GLB/Image] -->|Load & Parse| B(Runtime: GPUScene)
+     A[Asset: glTF/GLB/Image/EXR] -->|Load & Parse| B(Runtime: GPUScene)
      B -->|Flatten & Sort| C{RenderQueueBuilder}
      C --> D[RenderQueue]
 
@@ -231,9 +285,15 @@ graph TD
      D --> E[GeometryProcessor]
      E --> F[Homogeneous Clipping]
      F --> G[Rasterizer: Tile + SIMD + Early-Z]
-     G --> H[FragmentShader: PBR]
+     G --> H1[Opaque Pass]
+     H1 --> H2[Skybox / IBL Background]
+     H2 --> H3[Transparent Pass]
+     H3 --> H[FragmentShader: PBR + IBL]
      H --> I[Linear HDR Framebuffer]
      end
+
+     EXR[EXR Environment Map] -->|Decode & Precompute| IBL[EnvironmentMap: SH9 + Split-Sum]
+     IBL -->|Diffuse & Specular| H
 
      I --> J[FXAA]
      J --> K["ResolveToSRGB (optional)"]
@@ -246,10 +306,12 @@ graph TD
 - [x] 齐次裁剪（Sutherland-Hodgman，全视锥）
 - [x] 透视校正插值 + 深度缓冲
 - [x] Tile-based 并行光栅化（32x32）+ AVX2 4 像素 SIMD
+- [x] 全管线 OpenMP 并行化（几何 / 裁剪 / Binning / 光栅化 / 清除 / 后处理）
 - [x] FXAA + HDR->sRGB Resolve（LUT 加速）
 - [x] glTF/GLB 基础加载链路（Asset：JSON/BufferAccessor/ImageDecoder/Loader）
-- [ ] glTF 2.0 “完整支持”：Skinning / Animation / Morph Targets / KTX2(BasisU) / Draco 等
-- [ ] 更激进的 TBR：Hi-Z / tile-level early-out / 更强的 binning 策略
+- [x] IBL 环境光照（EXR 解码 / SH9 漫反射 / Split-Sum 镜面反射 / BRDF LUT / 天空盒）
+- [ ] glTF 2.0 "完整支持"：Skinning / Animation / Morph Targets / KTX2(BasisU) / Draco 等
+- [ ] 更激进的 TBR：Hi-Z / tile-level early-out
 - [ ] 手写更宽 SIMD（AVX-512）与关键算子专用向量化
 - [ ] 阴影（Shadow Mapping）与更多光源类型
 

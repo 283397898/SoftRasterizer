@@ -1,9 +1,12 @@
 #pragma once
 
+#include <vector>
 #include "Render/PassContext.h"
 #include "Scene/RenderQueue.h"
 
 namespace SR {
+
+struct Triangle;
 
 /**
  * @brief 渲染管线统计数据，汇总各个阶段的性能和指标
@@ -25,12 +28,15 @@ class RenderPipeline {
 public:
     /** @brief 渲染前准备 (如缓冲区清除) */
     void Prepare(const PassContext& pass) const;
-    /** @brief 执行渲染队列任务 */
-    RenderStats Draw(const RenderQueue& queue, const PassContext& pass) const;
+    /** @brief 执行渲染队列任务（可选延迟透明批次） */
+    RenderStats Draw(const RenderQueue& queue, const PassContext& pass,
+                     std::vector<Triangle>* outDeferredBlend = nullptr) const;
+    /** @brief 天空盒渲染（环境贴图背景） */
+    void RenderSkybox(const PassContext& pass) const;
     /** @brief 执行后处理流程 (FXAA, ToneMapping 等) */
     void PostProcess(const PassContext& pass) const;
     /** 
-     * @brief 执行完整渲染流程 (Prepare + Draw + PostProcess) 
+     * @brief 执行完整渲染流程 (Prepare + Draw + Skybox + PostProcess) 
      * @return 该帧的完整渲染统计信息
      */
     RenderStats Render(const RenderQueue& queue, const PassContext& pass) const;

@@ -1,5 +1,7 @@
 #include "Core/DepthBuffer.h"
 
+#include <omp.h>
+
 namespace SR {
 
 /**
@@ -15,8 +17,10 @@ void DepthBuffer::Resize(int width, int height) {
  * @brief 清除整个深度缓冲区
  */
 void DepthBuffer::Clear(double depthValue) {
-    for (auto& d : m_depth) {
-        d = depthValue;
+    const int n = static_cast<int>(m_depth.size());
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
+        m_depth[static_cast<size_t>(i)] = depthValue;
     }
 }
 

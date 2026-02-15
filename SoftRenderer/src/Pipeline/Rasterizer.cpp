@@ -287,7 +287,6 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     RasterScratchBuffers& scratch = g_rasterScratch;
     std::vector<RasterTriangle>& rasterTris = scratch.rasterTris;
     rasterTris.clear();
-    rasterTris.reserve(triangles.size() * 2);
 
     auto toScreenX = [width](double x) {
         return (x * 0.5 + 0.5) * static_cast<double>(width - 1);
@@ -296,9 +295,24 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         return (1.0 - (y * 0.5 + 0.5)) * static_cast<double>(height - 1);
     };
 
-    Clipper clipper;
+    // 并行裁剪：每线程独立 Clipper + 本地三角形列表，避免锁竞争
+    const int numInputTris = static_cast<int>(triangles.size());
+    const int maxClipThreads = omp_get_max_threads();
+    std::vector<std::vector<RasterTriangle>> perThreadClipTris(maxClipThreads);
+    std::vector<uint64_t> perThreadClipCount(maxClipThreads, 0);
 
-    for (const auto& tri : triangles) {
+    #pragma omp parallel
+    {
+        const int tid = omp_get_thread_num();
+        auto& localTris = perThreadClipTris[tid];
+        localTris.clear();
+        localTris.reserve(static_cast<size_t>(numInputTris / omp_get_num_threads()) * 2 + 16);
+        uint64_t localClipped = 0;
+        Clipper clipper;
+
+        #pragma omp for schedule(static)
+        for (int triIdx = 0; triIdx < numInputTris; ++triIdx) {
+            const auto& tri = triangles[static_cast<size_t>(triIdx)];
         // Backface culling moved to screen-space after projection.
 
         // Sutherland-Hodgman clipping
@@ -310,7 +324,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         if (clipped.size() < 3) {
             continue;
         }
-        stats.trianglesClipped += static_cast<uint64_t>(clipped.size() - 2);
+        localClipped += static_cast<uint64_t>(clipped.size() - 2);
 
         // Fan triangulation of clipped polygon
         for (size_t i = 1; i + 1 < clipped.size(); ++i) {
@@ -498,7 +512,25 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
             rt.emissiveTexCoordSet = tri.emissiveTexCoordSet;
             rt.transmissionTexCoordSet = tri.transmissionTexCoordSet;
 
-            rasterTris.push_back(rt);
+            localTris.push_back(rt);
+        }
+    }
+
+        perThreadClipCount[tid] = localClipped;
+    } // end omp parallel (clipping)
+
+    // 合并各线程裁剪结果
+    {
+        size_t totalRasterTris = 0;
+        for (int t = 0; t < maxClipThreads; ++t) {
+            totalRasterTris += perThreadClipTris[t].size();
+            stats.trianglesClipped += perThreadClipCount[t];
+        }
+        rasterTris.reserve(totalRasterTris);
+        for (auto& v : perThreadClipTris) {
+            rasterTris.insert(rasterTris.end(),
+                std::make_move_iterator(v.begin()),
+                std::make_move_iterator(v.end()));
         }
     }
 
@@ -577,28 +609,42 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     triMinTileY.resize(rasterTris.size());
     triMaxTileY.resize(rasterTris.size());
 
-    for (size_t i = 0; i < rasterTris.size(); ++i) {
-        const RasterTriangle& rt = rasterTris[i];
-        int minTileX = rt.minX / TILE_SIZE;
-        int maxTileX = rt.maxX / TILE_SIZE;
-        int minTileY = rt.minY / TILE_SIZE;
-        int maxTileY = rt.maxY / TILE_SIZE;
-        minTileX = std::max(minTileX, 0);
-        minTileY = std::max(minTileY, 0);
-        maxTileX = std::min(maxTileX, tilesX - 1);
-        maxTileY = std::min(maxTileY, tilesY - 1);
-        triMinTileX[i] = minTileX;
-        triMaxTileX[i] = maxTileX;
-        triMinTileY[i] = minTileY;
-        triMaxTileY[i] = maxTileY;
-        for (int ty = minTileY; ty <= maxTileY; ++ty) {
-            const int rowBase = ty * tilesX;
-            for (int tx = minTileX; tx <= maxTileX; ++tx) {
-                ++binCounts[static_cast<size_t>(rowBase + tx)];
+    const int numRasterTris = static_cast<int>(rasterTris.size());
+
+    // Pass 1: 并行计算每个三角形的 tile 范围 + 每线程独立直方图统计
+    #pragma omp parallel
+    {
+        std::vector<size_t> localBinCounts(static_cast<size_t>(totalTiles), 0);
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < numRasterTris; ++i) {
+            const RasterTriangle& rt = rasterTris[static_cast<size_t>(i)];
+            int minTileX = std::max(rt.minX / TILE_SIZE, 0);
+            int maxTileX = std::min(rt.maxX / TILE_SIZE, tilesX - 1);
+            int minTileY = std::max(rt.minY / TILE_SIZE, 0);
+            int maxTileY = std::min(rt.maxY / TILE_SIZE, tilesY - 1);
+            triMinTileX[static_cast<size_t>(i)] = minTileX;
+            triMaxTileX[static_cast<size_t>(i)] = maxTileX;
+            triMinTileY[static_cast<size_t>(i)] = minTileY;
+            triMaxTileY[static_cast<size_t>(i)] = maxTileY;
+            for (int ty = minTileY; ty <= maxTileY; ++ty) {
+                const int rowBase = ty * tilesX;
+                for (int tx = minTileX; tx <= maxTileX; ++tx) {
+                    ++localBinCounts[static_cast<size_t>(rowBase + tx)];
+                }
+            }
+        }
+
+        // 归约：合并各线程直方图
+        #pragma omp critical
+        {
+            for (int t = 0; t < totalTiles; ++t) {
+                binCounts[static_cast<size_t>(t)] += localBinCounts[static_cast<size_t>(t)];
             }
         }
     }
 
+    // Prefix sum（串行，O(totalTiles) 极快）
     binOffsets.resize(static_cast<size_t>(totalTiles) + 1);
     binOffsets[0] = 0;
     for (int t = 0; t < totalTiles; ++t) {
@@ -608,16 +654,22 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     binTriIndices.resize(totalBinRefs);
     binWriteCursor.assign(binOffsets.begin(), binOffsets.begin() + static_cast<size_t>(totalTiles));
 
-    for (size_t i = 0; i < rasterTris.size(); ++i) {
-        const int minTileX = triMinTileX[i];
-        const int maxTileX = triMaxTileX[i];
-        const int minTileY = triMinTileY[i];
-        const int maxTileY = triMaxTileY[i];
+    // Pass 2: 并行填充 bin 索引（Interlocked 原子写游标）
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < numRasterTris; ++i) {
+        const int minTileX = triMinTileX[static_cast<size_t>(i)];
+        const int maxTileX = triMaxTileX[static_cast<size_t>(i)];
+        const int minTileY = triMinTileY[static_cast<size_t>(i)];
+        const int maxTileY = triMaxTileY[static_cast<size_t>(i)];
         for (int ty = minTileY; ty <= maxTileY; ++ty) {
             const int rowBase = ty * tilesX;
             for (int tx = minTileX; tx <= maxTileX; ++tx) {
                 const size_t tileIndex = static_cast<size_t>(rowBase + tx);
-                binTriIndices[binWriteCursor[tileIndex]++] = i;
+                const size_t pos = static_cast<size_t>(
+                    _InterlockedExchangeAdd64(
+                        reinterpret_cast<volatile long long*>(&binWriteCursor[tileIndex]),
+                        1LL));
+                binTriIndices[pos] = static_cast<size_t>(i);
             }
         }
     }
@@ -716,6 +768,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                 fragCtx.material = &rt.material;
                 fragCtx.lights = &m_frameContext.lights;
                 fragCtx.ambientColor = m_frameContext.ambientColor;
+                fragCtx.environmentMap = m_frameContext.environmentMap;
                 fragCtx.images = m_frameContext.images;
                 fragCtx.samplers = m_frameContext.samplers;
                 fragCtx.baseColorImageIndex = rt.baseColorImageIndex;

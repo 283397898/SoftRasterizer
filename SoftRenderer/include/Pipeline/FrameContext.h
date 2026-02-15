@@ -10,6 +10,7 @@ namespace SR {
 
 struct GLTFImage;
 struct GLTFSampler;
+class EnvironmentMap;
 
 struct FrameContext {
     Mat4 view = Mat4::Identity();
@@ -19,6 +20,7 @@ struct FrameContext {
     std::vector<DirectionalLight> lights;
     const std::vector<GLTFImage>* images = nullptr;
     const std::vector<GLTFSampler>* samplers = nullptr;
+    const EnvironmentMap* environmentMap = nullptr;  ///< IBL 环境贴图（可选）
 };
 
 } // namespace SR

@@ -2,6 +2,7 @@ add_library(SoftRenderer SHARED
     src/Asset/GLTFLoader.cpp
     src/Asset/JSONParser.cpp
     src/Asset/ImageDecoder.cpp
+    src/Asset/EXRDecoder.cpp
     src/Renderer.cpp
     src/Math/Vec2.cpp
     src/Math/Vec3.cpp
@@ -20,6 +21,7 @@ add_library(SoftRenderer SHARED
     src/Pipeline/Clipper.cpp
     src/Pipeline/Rasterizer.cpp
     src/Pipeline/FragmentShader.cpp
+    src/Pipeline/EnvironmentMap.cpp
     src/Runtime/GPUScene.cpp
     src/Runtime/GPUSceneBuilder.cpp
     src/Scene/Scene.cpp

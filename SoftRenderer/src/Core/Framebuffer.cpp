@@ -25,8 +25,10 @@ void Framebuffer::Clear(const Color& color) {
         | (static_cast<uint32_t>(color.r) << 16)
         | (static_cast<uint32_t>(color.a) << 24);
 
-    for (auto& pixel : m_pixels) {
-        pixel = packed;
+    const int n = static_cast<int>(m_pixels.size());
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
+        m_pixels[static_cast<size_t>(i)] = packed;
     }
 }
 

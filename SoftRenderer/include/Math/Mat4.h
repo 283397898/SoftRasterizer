@@ -39,6 +39,8 @@ struct Mat4 {
     }
     /** @brief 矩阵乘法 */
     Mat4 operator*(const Mat4& rhs) const;
+    /** @brief 计算逆矩阵（通用 4x4 逆矩阵，基于伴随矩阵法） */
+    Mat4 Inverse() const;
 };
 
 } // namespace SR

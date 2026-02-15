@@ -13,6 +13,7 @@ namespace SR {
 
 struct GLTFImage;
 struct GLTFSampler;
+class EnvironmentMap;
 
 // Precomputed light data for faster shading (computed once per frame)
 struct PrecomputedLight {
@@ -28,6 +29,7 @@ struct FragmentContext {
     Vec3 ambientColor{0.03, 0.03, 0.03};
     const std::vector<GLTFImage>* images = nullptr;
     const std::vector<GLTFSampler>* samplers = nullptr;
+    const EnvironmentMap* environmentMap = nullptr;  ///< IBL 环境贴图（可选）
     int baseColorImageIndex = -1;
     int metallicRoughnessImageIndex = -1;
     int normalImageIndex = -1;

@@ -13,6 +13,7 @@
 #include "Runtime/GPUScene.h"
 #include "Asset/GLTFLoader.h"
 #include "Camera/OrbitCamera.h"
+#include "Pipeline/EnvironmentMap.h"
 #include "HDRPresenter.h"
 
 namespace SR {
@@ -60,6 +61,7 @@ private:
     Model m_model;                ///< 默认测试模型
     OrbitCamera m_camera;         ///< 用户交互相机
     GPUScene m_gpuScene;          ///< 运行时加速场景
+    EnvironmentMap m_envMap;      ///< IBL 环境贴图
     bool m_hasGLB = false;        ///< 是否加载了 GLB 资产
 
     bool m_useHDR = false;        ///< 是否启用 HDR 模式
