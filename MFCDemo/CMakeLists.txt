@@ -25,3 +25,11 @@ add_custom_command(TARGET MFCDemo POST_BUILD
         $<TARGET_FILE_DIR:MFCDemo>
     COMMENT "Copying SoftRenderer.dll to MFCDemo output directory"
 )
+
+# 将 example 文件夹复制到可执行文件目录
+add_custom_command(TARGET MFCDemo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/example
+        $<TARGET_FILE_DIR:MFCDemo>/example
+    COMMENT "Copying example folder to MFCDemo output directory"
+)
