@@ -2,10 +2,12 @@
 
 #include <vector>
 
+#include "Asset/GLTFTypes.h"
 #include "Core/Framebuffer.h"
 #include "Math/Vec2.h"
 #include "Math/Vec3.h"
 #include "Math/Vec4.h"
+#include "Scene/TextureBinding.h"
 #include "Scene/LightGroup.h"
 
 namespace SR {
@@ -14,77 +16,60 @@ struct GLTFImage;
 struct GLTFSampler;
 class EnvironmentMap;
 
-// Precomputed light data for faster shading (computed once per frame)
+/// @brief 每帧预计算的光照数据（避免在每个片元重复计算）
 struct PrecomputedLight {
-    Vec3 L;         // Normalized light direction (toward light)
-    Vec3 radiance;  // color * intensity
+    Vec3 L;        ///< 归一化光照方向（指向光源）
+    Vec3 radiance; ///< 辐射亮度 = 光照颜色 × 强度
 };
 
 /**
- * @brief Per-triangle constant data (shared across all pixels in a triangle)
+ * @brief 三角形级常量数据（同一三角形内所有像素共享）
  *
- * Material properties are copied here from MaterialTable during rasterization.
- * This keeps Triangle small while providing fast access in the hot path.
+ * 光栅化时从 MaterialTable 中复制材质属性到此结构，
+ * 既保持 Triangle 结构体小巧，又为热路径提供快速访问。
  */
 struct FragmentContext {
-    Vec3 cameraPos;
+    Vec3 cameraPos; ///< 相机世界空间位置（用于计算视线方向）
 
-    // PBR Material properties (copied from MaterialTable)
-    Vec3 albedo{1.0, 1.0, 1.0};
-    double metallic = 0.0;
-    double roughness = 0.5;
-    bool doubleSided = false;
-    double alpha = 1.0;
-    double transmissionFactor = 0.0;
-    int alphaMode = 0;
-    double alphaCutoff = 0.5;
-    Vec3 emissiveFactor{0.0, 0.0, 0.0};
-    double ior = 1.5;
-    double specularFactor = 1.0;
-    Vec3 specularColorFactor{1.0, 1.0, 1.0};
+    // PBR 材质属性（从 MaterialTable 复制）
+    Vec3  albedo{1.0, 1.0, 1.0}; ///< 基础颜色（反照率）
+    double metallic           = 0.0;  ///< 金属度 [0,1]
+    double roughness          = 0.5;  ///< 粗糙度 [0,1]
+    bool   doubleSided        = false; ///< 是否双面渲染
+    double alpha              = 1.0;  ///< 材质透明度
+    double transmissionFactor = 0.0;  ///< 透射强度 [0,1]
+    GLTFAlphaMode alphaMode   = GLTFAlphaMode::Opaque; ///< Alpha 模式
+    double alphaCutoff        = 0.5;  ///< Mask 模式下的 Alpha 裁剪阈值
+    Vec3   emissiveFactor{0.0, 0.0, 0.0}; ///< 自发光因子
+    double ior                = 1.5;  ///< 折射率（KHR_materials_ior）
+    double specularFactor     = 1.0;  ///< 镜面反射强度（KHR_materials_specular）
+    Vec3   specularColorFactor{1.0, 1.0, 1.0}; ///< 镜面反射颜色（KHR_materials_specular）
 
-    // Texture indices (copied from MaterialTable)
-    int32_t baseColorImageIndex = -1;
-    int32_t metallicRoughnessImageIndex = -1;
-    int32_t normalImageIndex = -1;
-    int32_t occlusionImageIndex = -1;
-    int32_t emissiveImageIndex = -1;
-    int32_t transmissionImageIndex = -1;
-    int32_t baseColorSamplerIndex = -1;
-    int32_t metallicRoughnessSamplerIndex = -1;
-    int32_t normalSamplerIndex = -1;
-    int32_t occlusionSamplerIndex = -1;
-    int32_t emissiveSamplerIndex = -1;
-    int32_t transmissionSamplerIndex = -1;
-    int32_t baseColorTexCoordSet = 0;
-    int32_t metallicRoughnessTexCoordSet = 0;
-    int32_t normalTexCoordSet = 0;
-    int32_t occlusionTexCoordSet = 0;
-    int32_t emissiveTexCoordSet = 0;
-    int32_t transmissionTexCoordSet = 0;
+    // 纹理绑定（从 MaterialTable 复制）
+    TextureBindingArray textures{};
 
-    // Scene references
-    const std::vector<DirectionalLight>* lights = nullptr;
-    Vec3 ambientColor{0.03, 0.03, 0.03};
-    const std::vector<GLTFImage>* images = nullptr;
-    const std::vector<GLTFSampler>* samplers = nullptr;
-    const EnvironmentMap* environmentMap = nullptr;
+    // 场景引用（指针，不持有所有权）
+    const std::vector<DirectionalLight>* lights = nullptr; ///< 平行光列表
+    Vec3 ambientColor{0.03, 0.03, 0.03};                   ///< 全局环境光（无 IBL 时使用）
+    const std::vector<GLTFImage>*   images   = nullptr;    ///< 纹理图像数组
+    const std::vector<GLTFSampler>* samplers = nullptr;    ///< 纹理采样器数组
+    const EnvironmentMap* environmentMap     = nullptr;    ///< IBL 环境贴图（可选）
 
     double tangentW = 1.0; ///< 切线 W 分量 (+1/-1)，决定副切线方向
 
-    // Precomputed light data (pointer to avoid vector copy - set by Rasterizer)
-    const PrecomputedLight* precomputedLights = nullptr;
-    size_t precomputedLightCount = 0;
+    // 预计算光照数据（指针，避免 vector 拷贝，由 Rasterizer 赋值）
+    const PrecomputedLight* precomputedLights = nullptr; ///< 预计算光照数组
+    size_t precomputedLightCount = 0;                    ///< 预计算光照数量
 };
 
-// Per-pixel varying data (interpolated for each pixel)
+/// @brief 像素级插值数据（在每个像素处由重心坐标插值得到）
 struct FragmentVarying {
-    Vec3 normal;
-    Vec3 worldPos;
-    Vec2 texCoord;
-    Vec2 texCoord1;
-    Vec4 color;
-    Vec3 tangent;
+    Vec3 normal;    ///< 插值后的世界空间法线
+    Vec3 worldPos;  ///< 插值后的世界空间位置
+    Vec2 texCoord;  ///< 主 UV 坐标（插值后）
+    Vec2 texCoord1; ///< 次 UV 坐标（插值后）
+    Vec4 color;     ///< 顶点颜色（插值后，RGBA）
+    Vec3 tangent;   ///< 世界空间切线（用于法线贴图）
 };
 
 /**

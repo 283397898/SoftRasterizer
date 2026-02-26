@@ -7,12 +7,10 @@
 #include <sstream>
 #include <chrono>
 #include <cstdio>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 #include "Asset/JSONParser.h"
 #include "Asset/ImageDecoder.h"
+#include "Utils/DebugLog.h"
 
 namespace SR {
 
@@ -182,10 +180,10 @@ int AccessorTypeFromString(const std::string& type) {
     return 0;
 }
 
-int AlphaModeFromString(const std::string& mode) {
-    if (mode == "MASK") return 1;
-    if (mode == "BLEND") return 2;
-    return 0;
+GLTFAlphaMode AlphaModeFromString(const std::string& mode) {
+    if (mode == "MASK") return GLTFAlphaMode::Mask;
+    if (mode == "BLEND") return GLTFAlphaMode::Blend;
+    return GLTFAlphaMode::Opaque;
 }
 
 void ReadArray(const JSONValue& value, double* outData, size_t count) {
@@ -428,10 +426,10 @@ bool ParseGLTFJson(const JSONValue& root, const std::filesystem::path& basePath,
                 return false;
             }
             GLTFSampler sampler;
-            sampler.wrapS = ReadInt(samplerObj["wrapS"], 10497);
-            sampler.wrapT = ReadInt(samplerObj["wrapT"], 10497);
-            sampler.minFilter = ReadInt(samplerObj["minFilter"], 0);
-            sampler.magFilter = ReadInt(samplerObj["magFilter"], 0);
+            sampler.wrapS = static_cast<GLTFWrapMode>(ReadInt(samplerObj["wrapS"], static_cast<int>(GLTFWrapMode::Repeat)));
+            sampler.wrapT = static_cast<GLTFWrapMode>(ReadInt(samplerObj["wrapT"], static_cast<int>(GLTFWrapMode::Repeat)));
+            sampler.minFilter = static_cast<GLTFFilterMode>(ReadInt(samplerObj["minFilter"], static_cast<int>(GLTFFilterMode::None)));
+            sampler.magFilter = static_cast<GLTFFilterMode>(ReadInt(samplerObj["magFilter"], static_cast<int>(GLTFFilterMode::None)));
             outAsset.samplers.push_back(sampler);
         }
     }
@@ -471,7 +469,7 @@ bool ParseGLTFJson(const JSONValue& root, const std::filesystem::path& basePath,
             }
             const JSONValue& extensions = materialObj["extensions"];
             if (extensions.IsObject()) {
-                // KHR_materials_transmission
+                // KHR_materials_transmission 扩展：光线透射率
                 if (extensions.HasKey("KHR_materials_transmission")) {
                     const JSONValue& transmission = extensions["KHR_materials_transmission"];
                     if (transmission.IsObject()) {
@@ -481,7 +479,7 @@ bool ParseGLTFJson(const JSONValue& root, const std::filesystem::path& basePath,
                         ParseTextureInfo(transmission["transmissionTexture"], material.transmission.transmissionTexture, false, false);
                     }
                 }
-                // KHR_materials_ior
+                // KHR_materials_ior 扩展：折射率
                 if (extensions.HasKey("KHR_materials_ior")) {
                     const JSONValue& iorObj = extensions["KHR_materials_ior"];
                     if (iorObj.IsObject()) {
@@ -489,7 +487,7 @@ bool ParseGLTFJson(const JSONValue& root, const std::filesystem::path& basePath,
                         material.iorExt.ior = ReadDouble(iorObj["ior"], material.iorExt.ior);
                     }
                 }
-                // KHR_materials_specular
+                // KHR_materials_specular 扩展：高光强度与颜色
                 if (extensions.HasKey("KHR_materials_specular")) {
                     const JSONValue& specObj = extensions["KHR_materials_specular"];
                     if (specObj.IsObject()) {
@@ -702,7 +700,7 @@ GLTFAsset GLTFLoader::LoadGLB(const std::string& path) {
         std::chrono::duration<double, std::milli>(tJson - tRead).count(),
         std::chrono::duration<double, std::milli>(tParse - tJson).count(),
         std::chrono::duration<double, std::milli>(tParse - t0).count());
-    OutputDebugStringA(buffer);
+    SR_DEBUG_LOG(buffer);
     return asset;
 }
 
@@ -744,7 +742,7 @@ GLTFAsset GLTFLoader::LoadGLTF(const std::string& path) {
         std::chrono::duration<double, std::milli>(tJson - tRead).count(),
         std::chrono::duration<double, std::milli>(tParse - tJson).count(),
         std::chrono::duration<double, std::milli>(tParse - t0).count());
-    OutputDebugStringA(buffer);
+    SR_DEBUG_LOG(buffer);
     return asset;
 }
 

@@ -50,16 +50,25 @@ PassBuilder& PassBuilder::SetCondition(const std::string& passName, PassConditio
     return *this;
 }
 
+/**
+ * @brief 对所有 Pass 进行拓扑排序（Kahn 算法）
+ *
+ * 使用 BFS + 入度表实现，保证被依赖的 Pass 先于依赖者执行。
+ * 若存在循环依赖，返回的结果数组长度将小于 m_passes.size()，
+ * 可通过 HasCircularDependency() 检测。
+ *
+ * @return 按执行顺序排列的 Pass 名称列表（空表示循环依赖）
+ */
 std::vector<std::string> PassBuilder::TopologicalSort() const {
+    // 初始化所有 Pass 的入度为 0
     std::unordered_map<std::string, int> inDegree;
     std::unordered_map<std::string, std::vector<std::string>> dependents;
 
-    // Initialize in-degree for all passes
     for (const auto& [name, node] : m_passes) {
         inDegree[name] = 0;
     }
 
-    // Build dependency graph and compute in-degrees
+    // 构建依赖图：对于 "A 依赖 B"，B 的 dependents 列表加入 A，A 的入度加 1
     for (const auto& [name, node] : m_passes) {
         for (const auto& dep : node.dependencies) {
             dependents[dep].push_back(name);
@@ -67,7 +76,7 @@ std::vector<std::string> PassBuilder::TopologicalSort() const {
         }
     }
 
-    // Kahn's algorithm with priority queue for stable ordering
+    // Kahn 算法：从所有入度为 0 的节点开始 BFS
     std::queue<std::string> queue;
     for (const auto& [name, degree] : inDegree) {
         if (degree == 0) {
@@ -81,6 +90,7 @@ std::vector<std::string> PassBuilder::TopologicalSort() const {
         queue.pop();
         result.push_back(current);
 
+        // 当前 Pass 完成后，其所有依赖者入度减 1；变为 0 时加入队列
         for (const auto& dependent : dependents[current]) {
             inDegree[dependent]--;
             if (inDegree[dependent] == 0) {
@@ -92,6 +102,7 @@ std::vector<std::string> PassBuilder::TopologicalSort() const {
     return result;
 }
 
+// 若拓扑排序结果数量不等于 Pass 总数，说明存在循环依赖
 bool PassBuilder::HasCircularDependency() const {
     return TopologicalSort().size() != m_passes.size();
 }
@@ -128,7 +139,7 @@ std::vector<std::unique_ptr<RenderPass>> PassBuilder::Build() {
         }
     }
 
-    // Clear the builder state after build
+    // Build 完成后清空构建器状态，防止重复使用
     m_passes.clear();
     m_error.clear();
 
@@ -140,7 +151,11 @@ void PassBuilder::Clear() {
     m_error.clear();
 }
 
-// DefaultPipeline implementation
+// ============================================================================
+// DefaultPipeline — 标准渲染管线配置
+// 执行顺序：OpaquePass → SkyboxPass → TransparentPass → PostProcessPass
+// ============================================================================
+
 std::vector<std::unique_ptr<RenderPass>> DefaultPipeline::Create() {
     PassBuilder builder;
     Configure(builder);
@@ -148,17 +163,18 @@ std::vector<std::unique_ptr<RenderPass>> DefaultPipeline::Create() {
 }
 
 PassBuilder& DefaultPipeline::Configure(PassBuilder& builder) {
-    // Add passes in default order
-    builder.AddPass(std::make_unique<OpaquePass>());
-    builder.AddPass(std::make_unique<SkyboxPass>());
-    builder.AddPass(std::make_unique<TransparentPass>());
-    builder.AddPass(std::make_unique<PostProcessPass>());
+    // 注册四个标准渲染阶段
+    builder.AddPass(std::make_unique<OpaquePass>());       // 不透明/Mask 几何体
+    builder.AddPass(std::make_unique<SkyboxPass>());       // 天空盒（填充深度为远平面的像素）
+    builder.AddPass(std::make_unique<TransparentPass>());  // 半透明几何体（从远到近排序）
+    builder.AddPass(std::make_unique<PostProcessPass>());  // 后处理（FXAA + 色调映射）
 
-    // Set up dependencies: Transparent depends on Opaque and Skybox
+    // 天空盒必须在不透明几何体之后（避免覆盖已有像素）
+    builder.AddDependency("SkyboxPass", "OpaquePass");
+    // 透明物体必须在不透明和天空盒之后（正确的混合需要完整的背景色）
     builder.AddDependency("TransparentPass", "OpaquePass");
     builder.AddDependency("TransparentPass", "SkyboxPass");
-
-    // PostProcess depends on all rendering passes
+    // 后处理必须在所有渲染 Pass 完成后执行
     builder.AddDependency("PostProcessPass", "OpaquePass");
     builder.AddDependency("PostProcessPass", "SkyboxPass");
     builder.AddDependency("PostProcessPass", "TransparentPass");

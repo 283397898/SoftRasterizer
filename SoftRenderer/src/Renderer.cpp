@@ -10,12 +10,77 @@
 #include "Render/PassContext.h"
 #include "Render/RenderPipeline.h"
 #include "Runtime/GPUScene.h"
+#include "Utils/DebugLog.h"
 
 #include <chrono>
 #include <cstdio>
-#include <windows.h>
 
 namespace SR {
+
+/**
+ * @brief 清除帧缓冲与深度缓冲
+ *
+ * HDR 模式下跳过 SDR 颜色清除（线性 HDR 始终清除）。
+ * 深度缓冲初始化为 1.0（最大深度，即远平面值）。
+ */
+void Renderer::ClearBuffers() {
+    if (!m_useHDR) {
+        Color clearColor{16, 16, 16, 255};
+        m_framebuffer.Clear(clearColor);
+    }
+    m_framebuffer.ClearLinear(Vec3{0.0, 0.0, 0.0});
+    m_depthBuffer.Clear(1.0);
+}
+
+/**
+ * @brief 从帧上下文构建渲染 Pass 上下文
+ *
+ * 将 FrameContext 与帧缓冲、后处理配置打包成 PassContext，
+ * 供 RenderPipeline 执行所有 Pass 时使用。
+ * HDR 模式下禁用色调映射（由外部呈现层处理）。
+ */
+PassContext Renderer::BuildPassContext(const FrameContext& frame) {
+    PassContext passContext{};
+    passContext.frame = frame;
+    passContext.framebuffer = &m_framebuffer;
+    passContext.depthBuffer = &m_depthBuffer;
+    passContext.enableFXAA = m_config.enableFXAA;
+    passContext.enableToneMap = m_config.enableToneMap && !m_useHDR;
+    passContext.exposure = m_config.exposure;
+    return passContext;
+}
+
+/**
+ * @brief 向调试输出输出帧性能统计信息
+ *
+ * 在 Debug 构建下通过 SR_DEBUG_LOG 输出，包含各阶段耗时和三角形/像素统计。
+ * Release 构建下为空操作。
+ */
+void Renderer::LogFrameStats(const RenderStats& stats, double clearMs, double setupMs, double totalMs, const char* label, size_t itemCount) const {
+    char buffer[256];
+    if (itemCount > 0) {
+        std::snprintf(
+            buffer, sizeof(buffer),
+            "%s Frame(ms): clear=%.3f setup=%.3f build=%.3f rast=%.3f total=%.3f | items=%zu tri: build=%llu clip=%llu rast=%llu | pix: test=%llu shade=%llu\n",
+            label, clearMs, setupMs, stats.buildMs, stats.rastMs, totalMs, itemCount,
+            static_cast<unsigned long long>(stats.trianglesBuilt),
+            static_cast<unsigned long long>(stats.trianglesClipped),
+            static_cast<unsigned long long>(stats.trianglesRaster),
+            static_cast<unsigned long long>(stats.pixelsTested),
+            static_cast<unsigned long long>(stats.pixelsShaded));
+    } else {
+        std::snprintf(
+            buffer, sizeof(buffer),
+            "%s Frame(ms): clear=%.3f setup=%.3f build=%.3f rast=%.3f total=%.3f | tri: build=%llu clip=%llu rast=%llu | pix: test=%llu shade=%llu\n",
+            label, clearMs, setupMs, stats.buildMs, stats.rastMs, totalMs,
+            static_cast<unsigned long long>(stats.trianglesBuilt),
+            static_cast<unsigned long long>(stats.trianglesClipped),
+            static_cast<unsigned long long>(stats.trianglesRaster),
+            static_cast<unsigned long long>(stats.pixelsTested),
+            static_cast<unsigned long long>(stats.pixelsShaded));
+    }
+    SR_DEBUG_LOG(buffer);
+}
 
 /**
  * @brief 初始化渲染器
@@ -80,12 +145,7 @@ void Renderer::Render(const Scene& scene) {
     using Clock = std::chrono::high_resolution_clock;
     auto frameStart = Clock::now();
 
-    if (!m_useHDR) {
-        Color clearColor{16, 16, 16, 255};
-        m_framebuffer.Clear(clearColor);
-    }
-    m_framebuffer.ClearLinear(Vec3{0.0, 0.0, 0.0});
-    m_depthBuffer.Clear(1.0);
+    ClearBuffers();
     auto clearEnd = Clock::now();
 
     const ObjectGroup* objects = scene.GetObjectGroup();
@@ -102,13 +162,7 @@ void Renderer::Render(const Scene& scene) {
     RenderQueueBuilder renderQueueBuilder;
     renderQueueBuilder.Build(*objects, renderQueue);
 
-    PassContext passContext{};
-    passContext.frame = frameContext;
-    passContext.framebuffer = &m_framebuffer;
-    passContext.depthBuffer = &m_depthBuffer;
-    passContext.enableFXAA = m_config.enableFXAA;
-    passContext.enableToneMap = m_config.enableToneMap && !m_useHDR;
-    passContext.exposure = m_config.exposure;
+    PassContext passContext = BuildPassContext(frameContext);
 
     RenderPipeline pipeline;
     RenderStats stats = pipeline.Render(renderQueue, passContext);
@@ -119,17 +173,7 @@ void Renderer::Render(const Scene& scene) {
     double setupMs = std::chrono::duration<double, std::milli>(setupEnd - clearEnd).count();
     double totalMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
 
-    char buffer[256];
-    std::snprintf(
-        buffer, sizeof(buffer),
-        "Frame(ms): clear=%.3f setup=%.3f build=%.3f rast=%.3f total=%.3f | tri: build=%llu clip=%llu rast=%llu | pix: test=%llu shade=%llu\n",
-        clearMs, setupMs, stats.buildMs, stats.rastMs, totalMs,
-        static_cast<unsigned long long>(stats.trianglesBuilt),
-        static_cast<unsigned long long>(stats.trianglesClipped),
-        static_cast<unsigned long long>(stats.trianglesRaster),
-        static_cast<unsigned long long>(stats.pixelsTested),
-        static_cast<unsigned long long>(stats.pixelsShaded));
-    OutputDebugStringA(buffer);
+    LogFrameStats(stats, clearMs, setupMs, totalMs, "Scene");
 }
 
 /**
@@ -140,12 +184,7 @@ void Renderer::Render(const GPUScene& scene) {
     using Clock = std::chrono::high_resolution_clock;
     auto frameStart = Clock::now();
 
-    if (!m_useHDR) {
-        Color clearColor{16, 16, 16, 255};
-        m_framebuffer.Clear(clearColor);
-    }
-    m_framebuffer.ClearLinear(Vec3{0.0, 0.0, 0.0});
-    m_depthBuffer.Clear(1.0);
+    ClearBuffers();
     auto clearEnd = Clock::now();
 
     FrameContext frameContext{};
@@ -168,36 +207,19 @@ void Renderer::Render(const GPUScene& scene) {
     queueBuilder.Build(scene, renderQueue, m_config.debugOnlyMaterialIndex);
     auto setupEnd = Clock::now();
 
-    PassContext passContext{};
-    passContext.frame = frameContext;
-    passContext.framebuffer = &m_framebuffer;
-    passContext.depthBuffer = &m_depthBuffer;
-    passContext.enableFXAA = m_config.enableFXAA;
-    passContext.enableToneMap = m_config.enableToneMap && !m_useHDR;
-    passContext.exposure = m_config.exposure;
+    PassContext passContext = BuildPassContext(frameContext);
 
     RenderPipeline pipeline;
-    OutputDebugStringA("GPUScene Render: before pipeline\n");
+    SR_DEBUG_LOG("GPUScene Render: before pipeline\n");
     RenderStats stats = pipeline.Render(renderQueue, passContext);
-    OutputDebugStringA("GPUScene Render: after pipeline\n");
+    SR_DEBUG_LOG("GPUScene Render: after pipeline\n");
     auto frameEnd = Clock::now();
 
     double clearMs = std::chrono::duration<double, std::milli>(clearEnd - frameStart).count();
     double setupMs = std::chrono::duration<double, std::milli>(setupEnd - clearEnd).count();
     double totalMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
 
-    char buffer[256];
-    std::snprintf(
-        buffer, sizeof(buffer),
-        "GPUScene Frame(ms): clear=%.3f setup=%.3f build=%.3f rast=%.3f total=%.3f | items=%zu tri: build=%llu clip=%llu rast=%llu | pix: test=%llu shade=%llu\n",
-        clearMs, setupMs, stats.buildMs, stats.rastMs, totalMs,
-        renderQueue.GetItems().size(),
-        static_cast<unsigned long long>(stats.trianglesBuilt),
-        static_cast<unsigned long long>(stats.trianglesClipped),
-        static_cast<unsigned long long>(stats.trianglesRaster),
-        static_cast<unsigned long long>(stats.pixelsTested),
-        static_cast<unsigned long long>(stats.pixelsShaded));
-    OutputDebugStringA(buffer);
+    LogFrameStats(stats, clearMs, setupMs, totalMs, "GPUScene", renderQueue.GetItems().size());
 }
 
 /**

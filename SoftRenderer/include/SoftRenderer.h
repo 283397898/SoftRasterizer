@@ -13,6 +13,9 @@ namespace SR {
 
 class Scene;
 class GPUScene;
+struct PassContext;
+struct FrameContext;
+struct RenderStats;
 
 /**
  * @brief 渲染器主类，负责整个渲染流程的管理
@@ -45,6 +48,10 @@ public:
     int GetHeight() const;
 
 private:
+    void ClearBuffers();
+    PassContext BuildPassContext(const FrameContext& frame);
+    void LogFrameStats(const RenderStats& stats, double clearMs, double setupMs, double totalMs, const char* label, size_t itemCount = 0) const;
+
     int m_width = 0;
     int m_height = 0;
     bool m_useHDR = false;

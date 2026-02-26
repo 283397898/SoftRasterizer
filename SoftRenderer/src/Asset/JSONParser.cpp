@@ -5,10 +5,7 @@
 #include <limits>
 #include <chrono>
 #include <cstdio>
-#define NOMINMAX
-#include <windows.h>
-#undef min
-#undef max
+#include "Utils/DebugLog.h"
 
 namespace SR {
 
@@ -416,7 +413,7 @@ std::optional<JSONValue> JSONParser::Parse(const std::string& jsonText) {
     char buffer[128];
     std::snprintf(buffer, sizeof(buffer), "JSON parse(ms): %.3f\n",
         std::chrono::duration<double, std::milli>(t1 - t0).count());
-    OutputDebugStringA(buffer);
+    SR_DEBUG_LOG(buffer);
     return value;
 }
 

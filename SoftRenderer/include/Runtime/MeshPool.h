@@ -24,8 +24,8 @@ public:
     size_t GetMeshMemory(Handle h) const {
         const Mesh* mesh = Get(h);
         if (!mesh) return 0;
-        // Vertex: ~56 bytes (position, normal, texCoord, tangent, color, etc.)
-        // Index: 4 bytes
+        // 顶点约 56 字节（position, normal, texCoord, tangent, color 等）
+        // 索引 4 字节
         const auto& vertices = mesh->GetVertices();
         const auto& indices = mesh->GetIndices();
         return vertices.size() * sizeof(Vertex) + indices.size() * sizeof(uint32_t);

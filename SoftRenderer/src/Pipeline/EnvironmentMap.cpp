@@ -1,14 +1,12 @@
 #include "Pipeline/EnvironmentMap.h"
 #include "Asset/EXRDecoder.h"
+#include "Utils/DebugLog.h"
+#include "Utils/PBRUtils.h"
 
 #include <algorithm>
 #include <cmath>
 #include <omp.h>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 namespace SR {
 
@@ -69,20 +67,6 @@ Vec3 ImportanceSampleGGX(const Vec2& Xi, const Vec3& N, double roughness) {
         tangent.z * H.x + bitangent.z * H.y + N.z * H.z
     };
     return sampleDir.Normalized();
-}
-
-// ============================================================================
-// Geometry Smith (与 FragmentShader 一致)
-// ============================================================================
-
-double GeometrySchlickGGX(double NdotV, double roughness) {
-    double r = roughness + 1.0;
-    double k = (r * r) * 0.125;
-    return NdotV / (NdotV * (1.0 - k) + k + 1e-12);
-}
-
-double GeometrySmith(double NdotV, double NdotL, double roughness) {
-    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
 }
 
 // 方向 → 等距柱形 UV
@@ -154,7 +138,7 @@ bool EnvironmentMap::LoadFromEXR(const std::string& path) {
         return false;
     }
 
-    OutputDebugStringA(("EnvironmentMap: loaded " + std::to_string(m_envMap.width) + "x"
+    SR_DEBUG_LOG(("EnvironmentMap: loaded " + std::to_string(m_envMap.width) + "x"
         + std::to_string(m_envMap.height) + " from " + path + "\n").c_str());
 
     // 预计算 IBL 数据
@@ -163,7 +147,7 @@ bool EnvironmentMap::LoadFromEXR(const std::string& path) {
     ComputeBRDFLUT();
 
     m_loaded = true;
-    OutputDebugStringA("EnvironmentMap: all precomputation done\n");
+    SR_DEBUG_LOG("EnvironmentMap: all precomputation done\n");
     return true;
 }
 
@@ -245,7 +229,7 @@ Vec2 EnvironmentMap::LookupBRDF(double NdotV, double roughness) const {
 // ============================================================================
 
 void EnvironmentMap::ComputeSH9() {
-    OutputDebugStringA("EnvironmentMap: computing SH9...\n");
+    SR_DEBUG_LOG("EnvironmentMap: computing SH9...\n");
 
     for (int i = 0; i < 9; ++i) m_sh[i] = Vec3{0.0, 0.0, 0.0};
 
@@ -253,11 +237,11 @@ void EnvironmentMap::ComputeSH9() {
     const int h = m_envMap.height;
 
     // SH 基函数常数
-    constexpr double Y00  = 0.282095;   // 1/(2*sqrt(pi))
-    constexpr double Y1n  = 0.488603;   // sqrt(3/(4*pi))
-    constexpr double Y2n2 = 1.092548;   // sqrt(15/(4*pi)) ... 实际是 1/2*sqrt(15/pi)
-    constexpr double Y20  = 0.315392;   // 1/4*sqrt(5/pi)
-    constexpr double Y22  = 0.546274;   // 1/4*sqrt(15/pi)
+    constexpr double Y00  = 0.282095;   ///< 1/(2√π)
+    constexpr double Y1n  = 0.488603;   ///< √(3/(4π))
+    constexpr double Y2n2 = 1.092548;   ///< ½√(15/π)
+    constexpr double Y20  = 0.315392;   ///< ¼√(5/π)
+    constexpr double Y22  = 0.546274;   ///< ¼√(15/π)
 
     // 并行累加，使用 per-thread 局部 SH
     const int maxThreads = omp_get_max_threads();
@@ -321,7 +305,7 @@ void EnvironmentMap::ComputeSH9() {
         }
     }
 
-    OutputDebugStringA("EnvironmentMap: SH9 done\n");
+    SR_DEBUG_LOG("EnvironmentMap: SH9 done\n");
 }
 
 // ============================================================================
@@ -329,7 +313,7 @@ void EnvironmentMap::ComputeSH9() {
 // ============================================================================
 
 void EnvironmentMap::ComputePrefilteredSpecular() {
-    OutputDebugStringA("EnvironmentMap: computing prefiltered specular...\n");
+    SR_DEBUG_LOG("EnvironmentMap: computing prefiltered specular...\n");
 
     constexpr int baseMipWidth = 256;
     constexpr uint32_t numSamples = 256;
@@ -414,7 +398,7 @@ void EnvironmentMap::ComputePrefilteredSpecular() {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "EnvironmentMap: specular mip %d (%dx%d, roughness=%.1f) done\n",
                 mip, mipW, mipH, roughness);
-            OutputDebugStringA(buf);
+            SR_DEBUG_LOG(buf);
         }
     }
 }
@@ -424,7 +408,7 @@ void EnvironmentMap::ComputePrefilteredSpecular() {
 // ============================================================================
 
 void EnvironmentMap::ComputeBRDFLUT() {
-    OutputDebugStringA("EnvironmentMap: computing BRDF LUT...\n");
+    SR_DEBUG_LOG("EnvironmentMap: computing BRDF LUT...\n");
 
     constexpr int size = kBRDFLutSize;
     constexpr uint32_t numSamples = 512;
@@ -476,7 +460,7 @@ void EnvironmentMap::ComputeBRDFLUT() {
         }
     }
 
-    OutputDebugStringA("EnvironmentMap: BRDF LUT done\n");
+    SR_DEBUG_LOG("EnvironmentMap: BRDF LUT done\n");
 }
 
 } // namespace SR

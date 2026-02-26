@@ -154,7 +154,7 @@ void Framebuffer::ApplyFXAA() {
     m_linearPixels.swap(m_fxaaTemp);
 }
 
-// Precomputed linear-to-sRGB LUT (1024 entries for high precision)
+// 预计算的线性到 sRGB 查找表（1024 个条目，高精度）
 static uint8_t kLinearToSRGBLUT[1024];
 static bool kLinearToSRGBTableInitialized = false;
 
@@ -213,7 +213,7 @@ void Framebuffer::ResolveToSRGB(double exposure, bool dither) {
     const Vec3* srcPixels = m_linearPixels.data();
     uint32_t* dstPixels = m_pixels.data();
 
-    // Precompute dither pattern
+    // 预计算抖动模式（Bayer 矩阵偏移，减少量化带状噪声）
     static const double kDitherPattern[4] = {-0.375 / 255.0, -0.125 / 255.0, 0.125 / 255.0, 0.375 / 255.0};
 
     #pragma omp parallel for schedule(static)
@@ -225,7 +225,7 @@ void Framebuffer::ResolveToSRGB(double exposure, bool dither) {
             const int idx = rowBase + x;
             const Vec3& c = srcPixels[idx];
             
-            // Apply exposure then ACES tone mapping (preserves color ratios)
+            // 先乘曝光系数，再应用 ACES 色调映射（保持各通道色彩比例）
             double r = ACESToneMap(c.x * exposure);
             double g = ACESToneMap(c.y * exposure);
             double b = ACESToneMap(c.z * exposure);

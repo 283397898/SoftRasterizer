@@ -5,14 +5,12 @@
 #include <utility>
 #include <chrono>
 #include <cstdio>
-#include <windows.h>
-#undef min
-#undef max
 
 #include "Asset/BufferAccessor.h"
 #include "Math/Vec2.h"
 #include "Math/Vec3.h"
 #include "Math/Vec4.h"
+#include "Utils/DebugLog.h"
 
 namespace SR {
 
@@ -38,7 +36,7 @@ void GPUScene::Clear() {
 	m_ownedMaterials.clear();
 	m_ownedImages.clear();
 	m_ownedSamplers.clear();
-	// Also clear pools
+	// 同步清空 ResourcePool（网格池和材质池）
 	m_meshPool.Clear();
 	m_materialPool.Clear();
 }
@@ -95,7 +93,7 @@ Mat4 BuildNodeLocalMatrix(const GLTFNode& node) {
 		Mat4 result{};
 		for (int row = 0; row < 4; ++row) {
 			for (int col = 0; col < 4; ++col) {
-				// glTF matrix is column-major; for row-vector math we need the transpose.
+				// glTF 矩阵为列主序；转为行向量数学约定需要转置
 				result.m[row][col] = node.matrix[row * 4 + col];
 			}
 		}
@@ -152,7 +150,7 @@ Mat4 ComputeNormalMatrix(const Mat4& modelMatrix) {
 	double invDet = 1.0 / det;
 
 	Mat4 normal = Mat4::Identity();
-	// inverse is adjugate / det, then transpose for normal matrix
+	// 法线矩阵 = 模型矩阵左上 3x3 的逆转置（伴随矩阵法）
 	normal.m[0][0] = c00 * invDet;
 	normal.m[1][0] = c01 * invDet;
 	normal.m[2][0] = c02 * invDet;
@@ -186,7 +184,7 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 	m_ownedMeshes.clear();
 	m_ownedMaterials.clear();
 
-	// Performance tracking
+	// 性能统计：各阶段耗时
 	double totalAccessorReadMs = 0.0;
 	double totalNormalsMs = 0.0;
 	double totalTangentsMs = 0.0;
@@ -220,11 +218,11 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 		material.alphaMode = srcMat.alphaMode;
 		material.alphaCutoff = srcMat.alphaCutoff;
 		material.emissiveFactor = Vec3{srcMat.emissiveFactor[0], srcMat.emissiveFactor[1], srcMat.emissiveFactor[2]};
-		// KHR_materials_ior
+		// KHR_materials_ior 扩展：折射率
 		if (srcMat.iorExt.hasIOR) {
 			material.ior = std::max(1.0, srcMat.iorExt.ior);
 		}
-		// KHR_materials_specular
+		// KHR_materials_specular 扩展：高光强度与颜色
 		if (srcMat.specular.hasSpecular) {
 			material.specularFactor = std::clamp(srcMat.specular.specularFactor, 0.0, 1.0);
 			material.specularColorFactor = Vec3{
@@ -237,7 +235,7 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 			srcMat.transmission.transmissionTexture.textureIndex >= 0;
 		if (srcMat.transmission.hasTransmission &&
 			(material.transmissionFactor > 0.0 || hasTransmissionTexture)) {
-			material.alphaMode = 2; // BLEND
+			material.alphaMode = GLTFAlphaMode::Blend;
 		}
 		m_ownedMaterials.push_back(material);
 	}
@@ -427,61 +425,36 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				if (prim.materialIndex >= 0 && prim.materialIndex < static_cast<int>(m_ownedMaterials.size())) {
 					matIndex = static_cast<size_t>(prim.materialIndex);
 				}
-				int baseColorTex = -1;
-				int metallicRoughnessTex = -1;
-				int normalTex = -1;
-				int occlusionTex = -1;
-				int emissiveTex = -1;
-				int transmissionTex = -1;
-				int baseColorImg = -1;
-				int metallicRoughnessImg = -1;
-				int normalImg = -1;
-				int occlusionImg = -1;
-				int emissiveImg = -1;
-				int transmissionImg = -1;
-				int baseColorSampler = -1;
-				int metallicRoughnessSampler = -1;
-				int normalSampler = -1;
-				int occlusionSampler = -1;
-				int emissiveSampler = -1;
-				int transmissionSampler = -1;
-				int baseColorTexCoordSet = 0;
-				int metallicRoughnessTexCoordSet = 0;
-				int normalTexCoordSet = 0;
-				int occlusionTexCoordSet = 0;
-				int emissiveTexCoordSet = 0;
-				int transmissionTexCoordSet = 0;
+				TextureBindingArray textures{};
 				if (prim.materialIndex >= 0 && prim.materialIndex < static_cast<int>(asset.materials.size())) {
 					const GLTFMaterial& gltfMat = asset.materials[prim.materialIndex];
-					baseColorTex = gltfMat.pbr.baseColorTexture.textureIndex;
-					metallicRoughnessTex = gltfMat.pbr.metallicRoughnessTexture.textureIndex;
-					normalTex = gltfMat.normalTexture.textureIndex;
-					occlusionTex = gltfMat.occlusionTexture.textureIndex;
-					emissiveTex = gltfMat.emissiveTexture.textureIndex;
-					baseColorTexCoordSet = gltfMat.pbr.baseColorTexture.texCoord;
-					metallicRoughnessTexCoordSet = gltfMat.pbr.metallicRoughnessTexture.texCoord;
-					normalTexCoordSet = gltfMat.normalTexture.texCoord;
-					occlusionTexCoordSet = gltfMat.occlusionTexture.texCoord;
-					emissiveTexCoordSet = gltfMat.emissiveTexture.texCoord;
+					textures[static_cast<size_t>(TextureSlot::BaseColor)].textureIndex = gltfMat.pbr.baseColorTexture.textureIndex;
+					textures[static_cast<size_t>(TextureSlot::MetallicRoughness)].textureIndex = gltfMat.pbr.metallicRoughnessTexture.textureIndex;
+					textures[static_cast<size_t>(TextureSlot::Normal)].textureIndex = gltfMat.normalTexture.textureIndex;
+					textures[static_cast<size_t>(TextureSlot::Occlusion)].textureIndex = gltfMat.occlusionTexture.textureIndex;
+					textures[static_cast<size_t>(TextureSlot::Emissive)].textureIndex = gltfMat.emissiveTexture.textureIndex;
+					textures[static_cast<size_t>(TextureSlot::BaseColor)].texCoordSet = gltfMat.pbr.baseColorTexture.texCoord;
+					textures[static_cast<size_t>(TextureSlot::MetallicRoughness)].texCoordSet = gltfMat.pbr.metallicRoughnessTexture.texCoord;
+					textures[static_cast<size_t>(TextureSlot::Normal)].texCoordSet = gltfMat.normalTexture.texCoord;
+					textures[static_cast<size_t>(TextureSlot::Occlusion)].texCoordSet = gltfMat.occlusionTexture.texCoord;
+					textures[static_cast<size_t>(TextureSlot::Emissive)].texCoordSet = gltfMat.emissiveTexture.texCoord;
 					if (gltfMat.transmission.hasTransmission) {
-						transmissionTex = gltfMat.transmission.transmissionTexture.textureIndex;
-						transmissionTexCoordSet = gltfMat.transmission.transmissionTexture.texCoord;
+						textures[static_cast<size_t>(TextureSlot::Transmission)].textureIndex = gltfMat.transmission.transmissionTexture.textureIndex;
+						textures[static_cast<size_t>(TextureSlot::Transmission)].texCoordSet = gltfMat.transmission.transmissionTexture.texCoord;
 					}
 				}
-				auto resolveTexture = [&](int textureIndex, int& outImage, int& outSampler) {
+				auto resolveTexture = [&](TextureBinding& binding) {
+					int textureIndex = binding.textureIndex;
 					if (textureIndex < 0 || textureIndex >= static_cast<int>(asset.textures.size())) {
 						return;
 					}
 					const GLTFTexture& tex = asset.textures[textureIndex];
-					outImage = tex.imageIndex;
-					outSampler = tex.samplerIndex;
+					binding.imageIndex = tex.imageIndex;
+					binding.samplerIndex = tex.samplerIndex;
 				};
-				resolveTexture(baseColorTex, baseColorImg, baseColorSampler);
-				resolveTexture(metallicRoughnessTex, metallicRoughnessImg, metallicRoughnessSampler);
-				resolveTexture(normalTex, normalImg, normalSampler);
-				resolveTexture(occlusionTex, occlusionImg, occlusionSampler);
-				resolveTexture(emissiveTex, emissiveImg, emissiveSampler);
-				resolveTexture(transmissionTex, transmissionImg, transmissionSampler);
+				for (size_t i = 0; i < textures.size(); ++i) {
+					resolveTexture(textures[i]);
+				}
 
 				GPUSceneDrawItem item{};
 				item.mesh = &m_ownedMeshes[meshSlot];
@@ -492,30 +465,7 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				item.materialIndex = prim.materialIndex;
 				item.primitiveIndex = static_cast<int>(primIndex);
 				item.nodeIndex = nodeIndex;
-				item.baseColorTextureIndex = baseColorTex;
-				item.metallicRoughnessTextureIndex = metallicRoughnessTex;
-				item.normalTextureIndex = normalTex;
-				item.occlusionTextureIndex = occlusionTex;
-				item.emissiveTextureIndex = emissiveTex;
-				item.transmissionTextureIndex = transmissionTex;
-				item.baseColorImageIndex = baseColorImg;
-				item.metallicRoughnessImageIndex = metallicRoughnessImg;
-				item.normalImageIndex = normalImg;
-				item.occlusionImageIndex = occlusionImg;
-				item.emissiveImageIndex = emissiveImg;
-				item.transmissionImageIndex = transmissionImg;
-				item.baseColorSamplerIndex = baseColorSampler;
-				item.metallicRoughnessSamplerIndex = metallicRoughnessSampler;
-				item.normalSamplerIndex = normalSampler;
-				item.occlusionSamplerIndex = occlusionSampler;
-				item.emissiveSamplerIndex = emissiveSampler;
-				item.transmissionSamplerIndex = transmissionSampler;
-				item.baseColorTexCoordSet = baseColorTexCoordSet;
-				item.metallicRoughnessTexCoordSet = metallicRoughnessTexCoordSet;
-				item.normalTexCoordSet = normalTexCoordSet;
-				item.occlusionTexCoordSet = occlusionTexCoordSet;
-				item.emissiveTexCoordSet = emissiveTexCoordSet;
-				item.transmissionTexCoordSet = transmissionTexCoordSet;
+				item.textures = textures;
 				AddDrawable(item);
 			}
 		}
@@ -556,30 +506,6 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 				item.materialIndex = prim.materialIndex;
 				item.primitiveIndex = static_cast<int>(primIndex);
 				item.nodeIndex = -1;
-				item.baseColorTextureIndex = -1;
-				item.metallicRoughnessTextureIndex = -1;
-				item.normalTextureIndex = -1;
-				item.occlusionTextureIndex = -1;
-				item.emissiveTextureIndex = -1;
-				item.transmissionTextureIndex = -1;
-				item.baseColorImageIndex = -1;
-				item.metallicRoughnessImageIndex = -1;
-				item.normalImageIndex = -1;
-				item.occlusionImageIndex = -1;
-				item.emissiveImageIndex = -1;
-				item.transmissionImageIndex = -1;
-				item.baseColorSamplerIndex = -1;
-				item.metallicRoughnessSamplerIndex = -1;
-				item.normalSamplerIndex = -1;
-				item.occlusionSamplerIndex = -1;
-				item.emissiveSamplerIndex = -1;
-				item.transmissionSamplerIndex = -1;
-				item.baseColorTexCoordSet = 0;
-				item.metallicRoughnessTexCoordSet = 0;
-				item.normalTexCoordSet = 0;
-				item.occlusionTexCoordSet = 0;
-				item.emissiveTexCoordSet = 0;
-				item.transmissionTexCoordSet = 0;
 				AddDrawable(item);
 			}
 		}
@@ -600,7 +526,7 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 		"  meshes=%zu primitives=%zu items=%zu images=%zu\n",
 		totalMs, totalAccessorReadMs, totalNormalsMs, normalGenCount, totalTangentsMs, tangentGenCount, sceneGraphMs,
 		asset.meshes.size(), totalPrims, m_items.size(), asset.images.size());
-	OutputDebugStringA(buffer);
+	SR_DEBUG_LOG(buffer);
 }
 
 // ========== ResourcePool 集成 API ==========
@@ -617,7 +543,7 @@ void GPUScene::EvictResources() {
 
 size_t GPUScene::GetTotalMemoryUsage() const {
 	size_t total = 0;
-	// Add up memory from traditional storage
+	// 统计传统存储（拥有权网格和图像）的内存
 	for (const auto& mesh : m_ownedMeshes) {
 		total += mesh.GetVertices().size() * sizeof(Vertex);
 		total += mesh.GetIndices().size() * sizeof(uint32_t);
@@ -625,7 +551,7 @@ size_t GPUScene::GetTotalMemoryUsage() const {
 	for (const auto& image : m_ownedImages) {
 		total += image.pixels.size();
 	}
-	// Add memory from pools
+	// 累加资源池中的内存
 	total += m_meshPool.GetTotalTriangleCount() * 3 * sizeof(uint32_t);
 	return total;
 }

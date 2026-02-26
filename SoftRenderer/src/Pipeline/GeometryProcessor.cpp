@@ -1,24 +1,82 @@
 #include "Pipeline/GeometryProcessor.h"
 
+#include "Pipeline/Rasterizer.h"
 #include "Pipeline/VertexShader.h"
-#include <mutex>
 
 namespace SR {
 
-// Mutex for thread-safe material table access
-static std::mutex g_materialTableMutex;
+MaterialParams BuildMaterialParams(const PBRMaterial& material, const DrawItem& item) {
+    MaterialParams params;
+    params.albedo = material.albedo;
+    params.metallic = material.metallic;
+    params.roughness = material.roughness;
+    params.doubleSided = material.doubleSided;
+    params.alpha = material.alpha;
+    params.transmissionFactor = material.transmissionFactor;
+    params.alphaMode = material.alphaMode;
+    params.alphaCutoff = material.alphaCutoff;
+    params.emissiveFactor = material.emissiveFactor;
+    params.ior = material.ior;
+    params.specularFactor = material.specularFactor;
+    params.specularColorFactor = material.specularColorFactor;
+
+    const TextureBinding& baseColor = item.textures[static_cast<size_t>(TextureSlot::BaseColor)];
+    const TextureBinding& metallicRoughness = item.textures[static_cast<size_t>(TextureSlot::MetallicRoughness)];
+    const TextureBinding& normal = item.textures[static_cast<size_t>(TextureSlot::Normal)];
+    const TextureBinding& occlusion = item.textures[static_cast<size_t>(TextureSlot::Occlusion)];
+    const TextureBinding& emissive = item.textures[static_cast<size_t>(TextureSlot::Emissive)];
+    const TextureBinding& transmission = item.textures[static_cast<size_t>(TextureSlot::Transmission)];
+
+    params.baseColorTextureIndex = baseColor.textureIndex;
+    params.metallicRoughnessTextureIndex = metallicRoughness.textureIndex;
+    params.normalTextureIndex = normal.textureIndex;
+    params.occlusionTextureIndex = occlusion.textureIndex;
+    params.emissiveTextureIndex = emissive.textureIndex;
+    params.transmissionTextureIndex = transmission.textureIndex;
+
+    params.baseColorImageIndex = baseColor.imageIndex;
+    params.metallicRoughnessImageIndex = metallicRoughness.imageIndex;
+    params.normalImageIndex = normal.imageIndex;
+    params.occlusionImageIndex = occlusion.imageIndex;
+    params.emissiveImageIndex = emissive.imageIndex;
+    params.transmissionImageIndex = transmission.imageIndex;
+
+    params.baseColorSamplerIndex = baseColor.samplerIndex;
+    params.metallicRoughnessSamplerIndex = metallicRoughness.samplerIndex;
+    params.normalSamplerIndex = normal.samplerIndex;
+    params.occlusionSamplerIndex = occlusion.samplerIndex;
+    params.emissiveSamplerIndex = emissive.samplerIndex;
+    params.transmissionSamplerIndex = transmission.samplerIndex;
+
+    params.baseColorTexCoordSet = baseColor.texCoordSet;
+    params.metallicRoughnessTexCoordSet = metallicRoughness.texCoordSet;
+    params.normalTexCoordSet = normal.texCoordSet;
+    params.occlusionTexCoordSet = occlusion.texCoordSet;
+    params.emissiveTexCoordSet = emissive.texCoordSet;
+    params.transmissionTexCoordSet = transmission.texCoordSet;
+
+    params.meshIndex = item.meshIndex;
+    params.materialIndex = item.materialIndex;
+    params.primitiveIndex = item.primitiveIndex;
+    params.nodeIndex = item.nodeIndex;
+
+    return params;
+}
 
 /**
  * @brief 构建经过变换的三角形集合
- * 执行 MVP 变换，世界空间变换，并计算世界空间法线
+ *
+ * 流程：
+ *   1. 对每个三角形：执行 MVP 变换（裁剪空间）+ 模型矩阵变换（世界空间位置）
+ *   2. 使用法线矩阵（模型矩阵逆转置）变换法线，正确处理非等比缩放
+ *   3. 每个 Triangle 仅存储 MaterialHandle（uint32_t），由调用者预先注册
  */
 void GeometryProcessor::BuildTriangles(const Mesh& mesh,
-                                       const PBRMaterial& material,
                                        const DrawItem& item,
                                        const Mat4& modelMatrix,
                                        const Mat4& normalMatrix,
                                        const FrameContext& frameContext,
-                                       MaterialTable& materialTable,
+                                       MaterialHandle materialHandle,
                                        std::vector<Triangle>& outTriangles) const {
     outTriangles.clear();
     m_lastTriangleCount = 0;
@@ -35,62 +93,6 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
 
     VertexShader vertexShader;
     vertexShader.SetMVP(mvp);
-
-    // Create MaterialParams from PBRMaterial and DrawItem
-    MaterialParams params;
-    params.albedo = material.albedo;
-    params.metallic = material.metallic;
-    params.roughness = material.roughness;
-    params.doubleSided = material.doubleSided;
-    params.alpha = material.alpha;
-    params.transmissionFactor = material.transmissionFactor;
-    params.alphaMode = material.alphaMode;
-    params.alphaCutoff = material.alphaCutoff;
-    params.emissiveFactor = material.emissiveFactor;
-    params.ior = material.ior;
-    params.specularFactor = material.specularFactor;
-    params.specularColorFactor = material.specularColorFactor;
-
-    // Use DrawItem indices (they contain the actual texture/image/sampler info)
-    params.baseColorTextureIndex = item.baseColorTextureIndex;
-    params.metallicRoughnessTextureIndex = item.metallicRoughnessTextureIndex;
-    params.normalTextureIndex = item.normalTextureIndex;
-    params.occlusionTextureIndex = item.occlusionTextureIndex;
-    params.emissiveTextureIndex = item.emissiveTextureIndex;
-    params.transmissionTextureIndex = item.transmissionTextureIndex;
-
-    params.baseColorImageIndex = item.baseColorImageIndex;
-    params.metallicRoughnessImageIndex = item.metallicRoughnessImageIndex;
-    params.normalImageIndex = item.normalImageIndex;
-    params.occlusionImageIndex = item.occlusionImageIndex;
-    params.emissiveImageIndex = item.emissiveImageIndex;
-    params.transmissionImageIndex = item.transmissionImageIndex;
-
-    params.baseColorSamplerIndex = item.baseColorSamplerIndex;
-    params.metallicRoughnessSamplerIndex = item.metallicRoughnessSamplerIndex;
-    params.normalSamplerIndex = item.normalSamplerIndex;
-    params.occlusionSamplerIndex = item.occlusionSamplerIndex;
-    params.emissiveSamplerIndex = item.emissiveSamplerIndex;
-    params.transmissionSamplerIndex = item.transmissionSamplerIndex;
-
-    params.baseColorTexCoordSet = item.baseColorTexCoordSet;
-    params.metallicRoughnessTexCoordSet = item.metallicRoughnessTexCoordSet;
-    params.normalTexCoordSet = item.normalTexCoordSet;
-    params.occlusionTexCoordSet = item.occlusionTexCoordSet;
-    params.emissiveTexCoordSet = item.emissiveTexCoordSet;
-    params.transmissionTexCoordSet = item.transmissionTexCoordSet;
-
-    params.meshIndex = item.meshIndex;
-    params.materialIndex = item.materialIndex;
-    params.primitiveIndex = item.primitiveIndex;
-    params.nodeIndex = item.nodeIndex;
-
-    // Thread-safe material addition
-    MaterialHandle materialId;
-    {
-        std::lock_guard<std::mutex> lock(g_materialTableMutex);
-        materialId = materialTable.AddMaterial(params);
-    }
 
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
         uint32_t i0 = indices[i];
@@ -140,7 +142,7 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
         tri.tg0 = tg0;
         tri.tg1 = tg1;
         tri.tg2 = tg2;
-        tri.tangentW = vertices[i0].tangentW; // 取第一个顶点的 w（同一三角形内通常一致）
+        tri.tangentW = vertices[i0].tangentW;
 
         Vec4 wp0 = modelMatrix.Multiply(Vec4{p0.x, p0.y, p0.z, 1.0});
         Vec4 wp1 = modelMatrix.Multiply(Vec4{p1.x, p1.y, p1.z, 1.0});
@@ -158,8 +160,7 @@ void GeometryProcessor::BuildTriangles(const Mesh& mesh,
         tri.n1 = Vec3{wn1.x, wn1.y, wn1.z}.Normalized();
         tri.n2 = Vec3{wn2.x, wn2.y, wn2.z}.Normalized();
 
-        // Set material handle instead of copying all material data
-        tri.materialId = materialId;
+        tri.materialId = materialHandle;
 
         outTriangles.push_back(tri);
     }

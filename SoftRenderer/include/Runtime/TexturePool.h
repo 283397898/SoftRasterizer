@@ -41,7 +41,7 @@ public:
     size_t GetTextureMemory(Handle h) const {
         const Texture* tex = Get(h);
         if (!tex) return 0;
-        return static_cast<size_t>(tex->GetWidth()) * tex->GetHeight() * 4; // BGRA8
+        return static_cast<size_t>(tex->GetWidth()) * tex->GetHeight() * 4; // BGRA8 格式，每像素 4 字节
     }
 
     /**
@@ -50,13 +50,12 @@ public:
      */
     void UpdateTextureMemory(Handle h) {
         size_t mem = GetTextureMemory(h);
-        // Recalculate total memory
+        // 重新遍历计算总内存（ResourcePool 不直接暴露内存设置接口）
         size_t total = 0;
         ForEach([&total](Handle, const Texture* tex) {
             total += static_cast<size_t>(tex->GetWidth()) * tex->GetHeight() * 4;
         });
-        // Note: ResourcePool doesn't expose a way to set memory usage directly
-        // For now, this is informational
+        // 当前仅作统计用途，ResourcePool 不直接暴露内存写入接口
     }
 
     /**

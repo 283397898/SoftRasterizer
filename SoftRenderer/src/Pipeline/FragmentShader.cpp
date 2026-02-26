@@ -6,43 +6,19 @@
 
 #include "Asset/GLTFTypes.h"
 #include "Pipeline/EnvironmentMap.h"
+#include "Utils/MathUtils.h"
+#include "Utils/PBRUtils.h"
+#include "Utils/TextureSampler.h"
 
 namespace SR {
 
 namespace {
 
-// Fast inverse square root (Quake III style, adapted for double precision)
-// Provides ~1% accuracy with much faster execution than 1/sqrt()
+// 快速倒数平方根（Quake III 风格，适配双精度版本）
+// 双精度下位运算技巧效果不佳，依赖编译器的 -ffast-math 优化
 inline double FastInvSqrt(double x) {
     if (x < 1e-12) return 0.0;
-    // Use standard sqrt for now - compiler will optimize with -ffast-math
-    // For double precision, the bit trick is less effective
     return 1.0 / std::sqrt(x);
-}
-
-// Precomputed sRGB to linear lookup table (256 entries)
-static double kSRGBToLinearLUT[256];
-static bool kSRGBTableInitialized = false;
-
-void InitSRGBTable() {
-    if (kSRGBTableInitialized) return;
-    for (int i = 0; i < 256; ++i) {
-        double v = i / 255.0;
-        if (v <= 0.04045) {
-            kSRGBToLinearLUT[i] = v / 12.92;
-        } else {
-            kSRGBToLinearLUT[i] = std::pow((v + 0.055) / 1.055, 2.4);
-        }
-    }
-    kSRGBTableInitialized = true;
-}
-
-/**
- * @brief sRGB 到线性空间的快速查表转换
- */
-inline double SRGBToLinearFast(uint8_t v) {
-    if (!kSRGBTableInitialized) InitSRGBTable();
-    return kSRGBToLinearLUT[v];
 }
 
 double Clamp01(double v) {
@@ -73,158 +49,9 @@ Vec3 Div(const Vec3& a, double s) {
     return Vec3{a.x / s, a.y / s, a.z / s};
 }
 
-Vec3 Lerp(const Vec3& a, const Vec3& b, double t) {
-    return Vec3{
-        a.x + (b.x - a.x) * t,
-        a.y + (b.y - a.y) * t,
-        a.z + (b.z - a.z) * t
-    };
-}
-
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kInvPi = 1.0 / kPi;
 
 constexpr bool kDebugTextureIndexTint = false;
-
-inline double Saturate(double v) {
-    return (v < 0.0) ? 0.0 : ((v > 1.0) ? 1.0 : v);
-}
-
-/**
- * @brief Fresnel-Schlick 近似公式
- */
-inline Vec3 FresnelSchlick(double cosTheta, const Vec3& F0) {
-    double t = 1.0 - Saturate(cosTheta);
-    double t2 = t * t;
-    double t5 = t2 * t2 * t;  // Fast pow5
-    return Vec3{
-        F0.x + (1.0 - F0.x) * t5,
-        F0.y + (1.0 - F0.y) * t5,
-        F0.z + (1.0 - F0.z) * t5
-    };
-}
-
-double SRGBToLinear(double v) {
-    return std::pow(v, 2.2);
-}
-
-struct SampledColor {
-    Vec3 rgb{1.0, 1.0, 1.0};
-    double a = 1.0;
-};
-
-double WrapCoord(double v, int mode) {
-    if (mode == 33071) { // CLAMP_TO_EDGE
-        return std::max(0.0, std::min(1.0, v));
-    }
-    if (mode == 33648) { // MIRRORED_REPEAT
-        double w = std::fmod(v, 2.0);
-        if (w < 0.0) w += 2.0;
-        return (w > 1.0) ? (2.0 - w) : w;
-    }
-    // REPEAT
-    double w = std::fmod(v, 1.0);
-    if (w < 0.0) w += 1.0;
-    return w;
-}
-
-SampledColor SampleImageNearest(const GLTFImage& image, const GLTFSampler* sampler, const Vec2& uv) {
-    int wrapS = sampler ? sampler->wrapS : 10497;
-    int wrapT = sampler ? sampler->wrapT : 10497;
-
-    double u = WrapCoord(uv.x, wrapS);
-    double v = WrapCoord(uv.y, wrapT);
-
-    int x = static_cast<int>(u * image.width);
-    int y = static_cast<int>(v * image.height);
-    x = std::max(0, std::min(x, image.width - 1));
-    y = std::max(0, std::min(y, image.height - 1));
-
-    size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-    if (index + 3 >= image.pixels.size()) {
-        return {};
-    }
-
-    const uint8_t* p = image.pixels.data() + index;
-    double r, g, b;
-    if (image.isSRGB) {
-        r = SRGBToLinearFast(p[0]);
-        g = SRGBToLinearFast(p[1]);
-        b = SRGBToLinearFast(p[2]);
-    } else {
-        r = p[0] / 255.0;
-        g = p[1] / 255.0;
-        b = p[2] / 255.0;
-    }
-    double a = p[3] / 255.0;
-
-    return {Vec3{r, g, b}, a};
-}
-
-SampledColor SampleImageBilinear(const GLTFImage& image, const GLTFSampler* sampler, const Vec2& uv) {
-    int wrapS = sampler ? sampler->wrapS : 10497;
-    int wrapT = sampler ? sampler->wrapT : 10497;
-
-    double u = WrapCoord(uv.x, wrapS);
-    double v = WrapCoord(uv.y, wrapT);
-
-    double fx = u * (image.width - 1);
-    double fy = v * (image.height - 1);
-    int x0 = static_cast<int>(fx);
-    int y0 = static_cast<int>(fy);
-    int x1 = std::min(x0 + 1, image.width - 1);
-    int y1 = std::min(y0 + 1, image.height - 1);
-    double tx = fx - x0;
-    double ty = fy - y0;
-
-    auto sample = [&](int x, int y) -> SampledColor {
-        size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-        if (index + 3 >= image.pixels.size()) {
-            return {};
-        }
-        const uint8_t* p = image.pixels.data() + index;
-        double r, g, b;
-        if (image.isSRGB) {
-            r = SRGBToLinearFast(p[0]);
-            g = SRGBToLinearFast(p[1]);
-            b = SRGBToLinearFast(p[2]);
-        } else {
-            r = p[0] / 255.0;
-            g = p[1] / 255.0;
-            b = p[2] / 255.0;
-        }
-        double a = p[3] / 255.0;
-        return {Vec3{r, g, b}, a};
-    };
-
-    SampledColor c00 = sample(x0, y0);
-    SampledColor c10 = sample(x1, y0);
-    SampledColor c01 = sample(x0, y1);
-    SampledColor c11 = sample(x1, y1);
-
-    Vec3 c0 = c00.rgb * (1.0 - tx) + c10.rgb * tx;
-    Vec3 c1 = c01.rgb * (1.0 - tx) + c11.rgb * tx;
-    Vec3 rgb = c0 * (1.0 - ty) + c1 * ty;
-    double a0 = c00.a * (1.0 - tx) + c10.a * tx;
-    double a1 = c01.a * (1.0 - tx) + c11.a * tx;
-    double a = a0 * (1.0 - ty) + a1 * ty;
-    return {rgb, a};
-}
-
-bool UseLinearFilter(const GLTFSampler* sampler) {
-    if (!sampler) {
-        return false;
-    }
-    int minFilter = sampler->minFilter;
-    int magFilter = sampler->magFilter;
-    if (magFilter == 9729) {
-        return true;
-    }
-    if (minFilter == 9729 || minFilter == 9984 || minFilter == 9985 || minFilter == 9986 || minFilter == 9987) {
-        return true;
-    }
-    return false;
-}
 
 Vec3 TintFromIndex(int index) {
     if (index < 0) {
@@ -237,29 +64,9 @@ Vec3 TintFromIndex(int index) {
     return Vec3{0.5 + 0.5 * r, 0.5 + 0.5 * g, 0.5 + 0.5 * b};
 }
 
-inline double DistributionGGX(double ndoth, double roughness) {
-    double a = roughness * roughness;
-    double a2 = a * a;
-    double denom = (ndoth * ndoth) * (a2 - 1.0) + 1.0;
-    return a2 * kInvPi / (denom * denom + 1e-12);
-}
-
-inline double GeometrySchlickGGX(double ndotv, double roughness) {
-    double r = roughness + 1.0;
-    double k = (r * r) * 0.125;  // k = (r*r) / 8
-    return ndotv / (ndotv * (1.0 - k) + k + 1e-12);
-}
-
-inline double GeometrySmith(double ndotv, double ndotl, double roughness) {
-    double r = roughness + 1.0;
-    double k = (r * r) * 0.125;
-    double ggx1 = ndotv / (ndotv * (1.0 - k) + k + 1e-12);
-    double ggx2 = ndotl / (ndotl * (1.0 - k) + k + 1e-12);
-    return ggx1 * ggx2;
-}
-
 // ============================================================================
-// Multi-scatter GGX energy compensation (Kulla-Conty 2017 / Fdez-Agüera 2019)
+// 多重散射 GGX 能量补偿（Kulla-Conty 2017 / Fdez-Agüera 2019）
+// 单次散射 GGX 在粗糙表面上会丢失能量，该模块对此进行修正
 // ============================================================================
 
 /**
@@ -301,13 +108,13 @@ inline Vec3 MultiscatterCompensation(const Vec3& F0, const Vec2& dfg) {
 } // namespace
 
 // ============================================================================
-// Optimized ShadeFast - separates per-triangle context from per-pixel varying
+// ShadeFast — 分离三角形级常量与像素级变量的优化着色器
+// FragmentContext 在三角形粒度上设置一次，FragmentVarying 每像素插值
 // ============================================================================
 
 namespace {
 
-// Fast texture sampling without FragmentInput wrapper
-// Optimized texture sampling with precomputed constants and reduced branching
+// 简化的纹理采样辅助函数，根据采样器配置自动选择最近邻或双线性过滤
 SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
                              const std::vector<GLTFSampler>* samplers,
                              int imageIndex, int samplerIndex,
@@ -321,91 +128,10 @@ SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
         sampler = &(*samplers)[samplerIndex];
     }
     
-    // Precompute constants (these could be cached per-image in future)
-    const int wrapS = sampler ? sampler->wrapS : 10497;
-    const int wrapT = sampler ? sampler->wrapT : 10497;
-    const double u = WrapCoord(texCoord.x, wrapS);
-    const double v = WrapCoord(texCoord.y, wrapT);
-    
-    const bool useLinear = UseLinearFilter(sampler);
-    const bool useSRGB = srgb || image.isSRGB;
-    
-    // Precompute frequently used values
-    const int w = image.width;
-    const int h = image.height;
-    const int stride = w * 4;  // RGBA stride
-    const uint8_t* pixelData = image.pixels.data();
-    constexpr double inv255 = 1.0 / 255.0;
-    
-    if (useLinear) {
-        // Bilinear filtering
-        const double fx = u * (w - 1);
-        const double fy = v * (h - 1);
-        const int x0 = static_cast<int>(fx);
-        const int y0 = static_cast<int>(fy);
-        const int x1 = (x0 + 1 < w) ? x0 + 1 : x0;  // Branchless clamp
-        const int y1 = (y0 + 1 < h) ? y0 + 1 : y0;
-        const double tx = fx - x0;
-        const double ty = fy - y0;
-        const double omtx = 1.0 - tx;
-        const double omty = 1.0 - ty;
-
-        // Direct pointer arithmetic (no lambda overhead)
-        const uint8_t* p00 = pixelData + (y0 * stride + x0 * 4);
-        const uint8_t* p10 = pixelData + (y0 * stride + x1 * 4);
-        const uint8_t* p01 = pixelData + (y1 * stride + x0 * 4);
-        const uint8_t* p11 = pixelData + (y1 * stride + x1 * 4);
-        
-        double r0, g0, b0, a0, r1, g1, b1, a1, r2, g2, b2, a2, r3, g3, b3, a3;
-        if (useSRGB) {
-            r0 = SRGBToLinearFast(p00[0]); g0 = SRGBToLinearFast(p00[1]); b0 = SRGBToLinearFast(p00[2]);
-            r1 = SRGBToLinearFast(p10[0]); g1 = SRGBToLinearFast(p10[1]); b1 = SRGBToLinearFast(p10[2]);
-            r2 = SRGBToLinearFast(p01[0]); g2 = SRGBToLinearFast(p01[1]); b2 = SRGBToLinearFast(p01[2]);
-            r3 = SRGBToLinearFast(p11[0]); g3 = SRGBToLinearFast(p11[1]); b3 = SRGBToLinearFast(p11[2]);
-        } else {
-            r0 = p00[0] * inv255; g0 = p00[1] * inv255; b0 = p00[2] * inv255;
-            r1 = p10[0] * inv255; g1 = p10[1] * inv255; b1 = p10[2] * inv255;
-            r2 = p01[0] * inv255; g2 = p01[1] * inv255; b2 = p01[2] * inv255;
-            r3 = p11[0] * inv255; g3 = p11[1] * inv255; b3 = p11[2] * inv255;
-        }
-        a0 = p00[3] * inv255; a1 = p10[3] * inv255;
-        a2 = p01[3] * inv255; a3 = p11[3] * inv255;
-        
-        // Bilinear interpolation (fused multiply-add friendly)
-        const double w00 = omtx * omty;
-        const double w10 = tx * omty;
-        const double w01 = omtx * ty;
-        const double w11 = tx * ty;
-        
-        return {
-            Vec3{
-                r0 * w00 + r1 * w10 + r2 * w01 + r3 * w11,
-                g0 * w00 + g1 * w10 + g2 * w01 + g3 * w11,
-                b0 * w00 + b1 * w10 + b2 * w01 + b3 * w11
-            },
-            a0 * w00 + a1 * w10 + a2 * w01 + a3 * w11
-        };
-    } else {
-        // Nearest filtering
-        int x = static_cast<int>(u * w);
-        int y = static_cast<int>(v * h);
-        // Branchless clamp
-        x = (x < 0) ? 0 : ((x >= w) ? w - 1 : x);
-        y = (y < 0) ? 0 : ((y >= h) ? h - 1 : y);
-        
-        const uint8_t* p = pixelData + (y * stride + x * 4);
-        double r, g, b;
-        if (useSRGB) {
-            r = SRGBToLinearFast(p[0]);
-            g = SRGBToLinearFast(p[1]);
-            b = SRGBToLinearFast(p[2]);
-        } else {
-            r = p[0] * inv255;
-            g = p[1] * inv255;
-            b = p[2] * inv255;
-        }
-        return {Vec3{r, g, b}, p[3] * inv255};
+    if (UseLinearFilter(sampler)) {
+        return SampleImageBilinear(image, sampler, texCoord, srgb);
     }
+    return SampleImageNearest(image, sampler, texCoord, srgb);
 }
 
 } // namespace
@@ -414,7 +140,7 @@ SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
  * @brief 高性能片元着色实现
  */
 Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying& varying, double* outEffectiveAlpha) const {
-    // Inline normalize for N (avoid function call overhead)
+    // 内联归一化法线 N（避免函数调用开销，热路径优化）
     Vec3 N = varying.normal;
     double nLenSq = N.x * N.x + N.y * N.y + N.z * N.z;
     if (nLenSq > 1e-12) {
@@ -422,7 +148,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         N.x *= invNLen; N.y *= invNLen; N.z *= invNLen;
     }
 
-    // Inline normalize for V (avoid function call overhead)
+    // 计算视线方向 V（世界空间，从片元指向相机）
     Vec3 V{ctx.cameraPos.x - varying.worldPos.x,
            ctx.cameraPos.y - varying.worldPos.y,
            ctx.cameraPos.z - varying.worldPos.z};
@@ -432,7 +158,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         V.x *= invVLen; V.y *= invVLen; V.z *= invVLen;
     }
 
-    // Double-sided: flip normal to face the viewer (glTF spec requirement)
+    // 双面渲染：若法线背向视线则翻转（符合 glTF 规范要求）
     if (ctx.doubleSided) {
         double ndotv_raw = N.x * V.x + N.y * V.y + N.z * V.z;
         if (ndotv_raw < 0.0) {
@@ -443,57 +169,64 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
     double roughness = std::max(0.04, ctx.roughness);
     double metallic = Saturate(ctx.metallic);
     Vec3 albedo = Clamp01(ctx.albedo);
+    const TextureBinding& baseColorBinding = ctx.textures[static_cast<size_t>(TextureSlot::BaseColor)];
+    const TextureBinding& metallicRoughnessBinding = ctx.textures[static_cast<size_t>(TextureSlot::MetallicRoughness)];
+    const TextureBinding& normalBinding = ctx.textures[static_cast<size_t>(TextureSlot::Normal)];
+    const TextureBinding& occlusionBinding = ctx.textures[static_cast<size_t>(TextureSlot::Occlusion)];
+    const TextureBinding& emissiveBinding = ctx.textures[static_cast<size_t>(TextureSlot::Emissive)];
+    const TextureBinding& transmissionBinding = ctx.textures[static_cast<size_t>(TextureSlot::Transmission)];
 
-    // Sample base color texture
+    // ---- 纹理采样阶段 ----
+    // 采样基础颜色贴图（sRGB 解码）并与顶点颜色相乘
     double alpha = ctx.alpha;
-    if (ctx.baseColorImageIndex >= 0) {
-        Vec2 baseUv = (ctx.baseColorTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+    if (baseColorBinding.imageIndex >= 0) {
+        Vec2 baseUv = (baseColorBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor baseColor = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.baseColorImageIndex, ctx.baseColorSamplerIndex, baseUv, true);
+            baseColorBinding.imageIndex, baseColorBinding.samplerIndex, baseUv, true);
         Vec3 vertexColor = Clamp01(Vec3{varying.color.x, varying.color.y, varying.color.z});
         albedo = Mul(Mul(albedo, baseColor.rgb), vertexColor);
         alpha *= baseColor.a * Clamp01(varying.color.w);
     }
-    if (ctx.baseColorImageIndex < 0) {
+    if (baseColorBinding.imageIndex < 0) {
         Vec3 vertexColor = Clamp01(Vec3{varying.color.x, varying.color.y, varying.color.z});
         albedo = Mul(albedo, vertexColor);
         alpha *= Clamp01(varying.color.w);
     }
-    if (ctx.transmissionFactor > 0.0 || ctx.transmissionImageIndex >= 0) {
+    if (ctx.transmissionFactor > 0.0 || transmissionBinding.imageIndex >= 0) {
         double t = Saturate(ctx.transmissionFactor);
-        if (ctx.transmissionImageIndex >= 0) {
-            Vec2 tUv = (ctx.transmissionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+        if (transmissionBinding.imageIndex >= 0) {
+            Vec2 tUv = (transmissionBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
             SampledColor transmission = SampleImageFast(ctx.images, ctx.samplers,
-                ctx.transmissionImageIndex, ctx.transmissionSamplerIndex, tUv, false);
+                transmissionBinding.imageIndex, transmissionBinding.samplerIndex, tUv, false);
             t *= transmission.rgb.x;
         }
         alpha *= (1.0 - Saturate(t));
     }
 
-    // Sample metallic-roughness texture
-    if (ctx.metallicRoughnessImageIndex >= 0) {
-        Vec2 mrUv = (ctx.metallicRoughnessTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+    // 采样金属度-粗糙度贴图（线性空间：B=金属度, G=粗糙度）
+    if (metallicRoughnessBinding.imageIndex >= 0) {
+        Vec2 mrUv = (metallicRoughnessBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor mr = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.metallicRoughnessImageIndex, ctx.metallicRoughnessSamplerIndex, mrUv, false);
+            metallicRoughnessBinding.imageIndex, metallicRoughnessBinding.samplerIndex, mrUv, false);
         metallic = Saturate(metallic * mr.rgb.z);
         roughness = std::max(0.04, mr.rgb.y * roughness);
     }
 
-    // Apply normal mapping
-    if (ctx.normalImageIndex >= 0) {
-        // Inline normalize for T
+    // 法线贴图：将切线空间法线变换到世界空间，更新 N 向量
+    if (normalBinding.imageIndex >= 0) {
+        // 内联归一化切线 T（避免函数调用开销）
         Vec3 T = varying.tangent;
         double tLenSq = T.x * T.x + T.y * T.y + T.z * T.z;
         if (tLenSq > 1e-12) {
             double invTLen = 1.0 / std::sqrt(tLenSq);
             T.x *= invTLen; T.y *= invTLen; T.z *= invTLen;
 
-            Vec2 nUv = (ctx.normalTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+            Vec2 nUv = (normalBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
             SampledColor nm = SampleImageFast(ctx.images, ctx.samplers,
-                ctx.normalImageIndex, ctx.normalSamplerIndex, nUv, false);
+                normalBinding.imageIndex, normalBinding.samplerIndex, nUv, false);
             Vec3 tangentNormal{nm.rgb.x * 2.0 - 1.0, nm.rgb.y * 2.0 - 1.0, nm.rgb.z * 2.0 - 1.0};
 
-            // Inline Cross and normalize for B, then multiply by tangentW for handedness
+            // 计算副切线 B = cross(N, T) * tangentW（tangentW 决定坐标系手性）
             Vec3 B{N.y * T.z - N.z * T.y, N.z * T.x - N.x * T.z, N.x * T.y - N.y * T.x};
             double bLenSq = B.x * B.x + B.y * B.y + B.z * B.z;
             if (bLenSq > 1e-12) {
@@ -507,7 +240,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
                 T.z * tangentNormal.x + B.z * tangentNormal.y + N.z * tangentNormal.z
             };
 
-            // Inline normalize for worldNormal
+            // 将 TBN 变换后的法线重新归一化
             double wnLenSq = worldNormal.x * worldNormal.x + worldNormal.y * worldNormal.y + worldNormal.z * worldNormal.z;
             if (wnLenSq > 1e-12) {
                 double invWnLen = 1.0 / std::sqrt(wnLenSq);
@@ -518,10 +251,10 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
     }
 
-    // Compute dielectric F0 from IOR: F0 = ((ior-1)/(ior+1))^2
+    // 根据折射率计算电介质 F0（菲涅耳垂直入射反射率）：F0 = ((ior-1)/(ior+1))^2
     double iorF0 = (ctx.ior - 1.0) / (ctx.ior + 1.0);
     iorF0 = iorF0 * iorF0;
-    // Apply KHR_materials_specular
+    // 应用 KHR_materials_specular：镜面反射强度和颜色因子修正 F0
     Vec3 dielectricF0{
         iorF0 * ctx.specularFactor * ctx.specularColorFactor.x,
         iorF0 * ctx.specularFactor * ctx.specularColorFactor.y,
@@ -529,20 +262,19 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
     };
     Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
 
-    // For BLEND mode: premultiply diffuse/ambient by alpha so specular
-    // reflections stay at full Fresnel strength (glass looks reflective).
-    // The rasterizer uses premultiplied blend: result = shaded + bg*(1-alpha)
-    double premulAlpha = (ctx.alphaMode == 2) ? Saturate(alpha) : 1.0;
+    // BLEND 模式下对漫反射进行预乘 Alpha：镜面高光保持全强度（使玻璃仍有反射）
+    // 光栅化器使用预乘混合：result = shaded + bg*(1-alpha)
+    double premulAlpha = (ctx.alphaMode == GLTFAlphaMode::Blend) ? Saturate(alpha) : 1.0;
 
     double ndotv = std::max(0.0, Vec3::Dot(N, V));
 
-    // Multi-scatter GGX energy compensation (Kulla-Conty)
+    // 多重散射 GGX 能量补偿（Kulla-Conty），修正粗糙金属暗化问题
     Vec2 dfg = ApproxDFG(ndotv, roughness);
     Vec3 Fms = MultiscatterCompensation(F0, dfg);
 
     Vec3 Lo{0.0, 0.0, 0.0};
 
-    // Use precomputed light data if available (pointer-based, no vector copy)
+    // 使用预计算的光照数据（指针访问，避免 vector 拷贝开销）
     if (ctx.precomputedLights && ctx.precomputedLightCount > 0) {
         for (size_t i = 0; i < ctx.precomputedLightCount; ++i) {
             const PrecomputedLight& pl = ctx.precomputedLights[i];
@@ -550,10 +282,10 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
 
             double ndotl = Vec3::Dot(N, L);
 
-            // Early exit if light is on back side
+            // 光源在背面时跳过（早期退出，减少无效着色）
             if (ndotl <= 0.0) continue;
 
-            // Compute H = normalize(L + V) - inline to avoid function call
+            // 计算半角向量 H = normalize(L + V)，内联避免函数调用
             Vec3 H{L.x + V.x, L.y + V.y, L.z + V.z};
             double hLenSq = H.x * H.x + H.y * H.y + H.z * H.z;
             if (hLenSq > 1e-12) {
@@ -580,12 +312,12 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
             }
 
             Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
-            contrib = Mul(contrib, pl.radiance);  // Use precomputed radiance
+            contrib = Mul(contrib, pl.radiance);  // 使用预计算辐照度
 
             Lo = Add(Lo, contrib);
         }
     } else if (ctx.lights) {
-        // Fallback to original path (for backwards compatibility)
+        // 回退路径（向后兼容旧版光照数据）
         for (const DirectionalLight& light : *ctx.lights) {
             Vec3 L = Vec3{-light.direction.x, -light.direction.y, -light.direction.z}.Normalized();
             Vec3 H = (L + V).Normalized();
@@ -640,7 +372,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         if (rLen > 1e-12) { double inv = 1.0 / rLen; R.x *= inv; R.y *= inv; R.z *= inv; }
         Vec3 prefilteredColor = ctx.environmentMap->SampleSpecular(R, roughness);
         Vec2 brdf = ctx.environmentMap->LookupBRDF(ndotv, roughness);
-        // specular = prefilteredColor * (F0 * scale + bias) * Fms
+        // 镜面环境光 = prefilteredColor * (F0 * scale + bias) * Fms（Split-Sum 第二项）
         ambientSpecular = Vec3{
             prefilteredColor.x * (F0.x * brdf.x + brdf.y) * Fms.x,
             prefilteredColor.y * (F0.y * brdf.x + brdf.y) * Fms.y,
@@ -658,10 +390,10 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
 
     Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
 
-    if (ctx.occlusionImageIndex >= 0) {
-        Vec2 occUv = (ctx.occlusionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+    if (occlusionBinding.imageIndex >= 0) {
+        Vec2 occUv = (occlusionBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor occ = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.occlusionImageIndex, ctx.occlusionSamplerIndex, occUv, false);
+            occlusionBinding.imageIndex, occlusionBinding.samplerIndex, occUv, false);
         // 仅对漫反射环境光应用 AO（镜面反射不受局部遮蔽影响）
         ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
         ambient = Add(ambientDiffuse, ambientSpecular);
@@ -669,18 +401,18 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
 
     Vec3 color = Add(ambient, Lo);
 
-    // Emissive: texture * emissiveFactor, or just emissiveFactor if no texture
+    // 自发光：若有纹理则为 texture * emissiveFactor，否则直接使用 emissiveFactor
     Vec3 emissiveContrib = ctx.emissiveFactor;
-    if (ctx.emissiveImageIndex >= 0) {
-        Vec2 emUv = (ctx.emissiveTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
+    if (emissiveBinding.imageIndex >= 0) {
+        Vec2 emUv = (emissiveBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor emissive = SampleImageFast(ctx.images, ctx.samplers,
-            ctx.emissiveImageIndex, ctx.emissiveSamplerIndex, emUv, true);
+            emissiveBinding.imageIndex, emissiveBinding.samplerIndex, emUv, true);
         emissiveContrib = Mul(emissive.rgb, ctx.emissiveFactor);
     }
     color = Add(color, emissiveContrib);
 
-    // Output alpha unchanged (Fresnel reflection is handled via premultiplied
-    // specular in the shaded color; the blend alpha stays as material alpha).
+    // 输出 alpha 保持不变（Fresnel 反射已通过预乘镜面反射写入 shaded 颜色；
+    // 混合 alpha 维持原始材质透明度）。
     if (outEffectiveAlpha) {
         *outEffectiveAlpha = alpha;
     }

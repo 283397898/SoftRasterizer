@@ -7,7 +7,7 @@ MaterialTable::MaterialTable() {
 }
 
 void MaterialTable::InitializeDefaultMaterial() {
-    // Slot 0 is reserved for default material
+    // 插槽 0 保留给默认材质（所有未指定材质的三角形使用此句柄）
     m_valid.push_back(true);
     m_albedo.emplace_back(1.0, 1.0, 1.0);
     m_metallic.push_back(0.0);
@@ -15,14 +15,14 @@ void MaterialTable::InitializeDefaultMaterial() {
     m_doubleSided.push_back(false);
     m_alpha.push_back(1.0);
     m_transmissionFactor.push_back(0.0);
-    m_alphaMode.push_back(0);
+    m_alphaMode.push_back(GLTFAlphaMode::Opaque);
     m_alphaCutoff.push_back(0.5);
     m_emissiveFactor.emplace_back(0.0, 0.0, 0.0);
     m_ior.push_back(1.5);
     m_specularFactor.push_back(1.0);
     m_specularColorFactor.emplace_back(1.0, 1.0, 1.0);
 
-    // Texture indices
+    // 纹理索引（默认全部无纹理）
     m_baseColorTextureIndex.push_back(-1);
     m_metallicRoughnessTextureIndex.push_back(-1);
     m_normalTextureIndex.push_back(-1);
@@ -30,7 +30,7 @@ void MaterialTable::InitializeDefaultMaterial() {
     m_emissiveTextureIndex.push_back(-1);
     m_transmissionTextureIndex.push_back(-1);
 
-    // Image indices
+    // 图像索引
     m_baseColorImageIndex.push_back(-1);
     m_metallicRoughnessImageIndex.push_back(-1);
     m_normalImageIndex.push_back(-1);
@@ -38,7 +38,7 @@ void MaterialTable::InitializeDefaultMaterial() {
     m_emissiveImageIndex.push_back(-1);
     m_transmissionImageIndex.push_back(-1);
 
-    // Sampler indices
+    // 采样器索引
     m_baseColorSamplerIndex.push_back(-1);
     m_metallicRoughnessSamplerIndex.push_back(-1);
     m_normalSamplerIndex.push_back(-1);
@@ -46,7 +46,7 @@ void MaterialTable::InitializeDefaultMaterial() {
     m_emissiveSamplerIndex.push_back(-1);
     m_transmissionSamplerIndex.push_back(-1);
 
-    // TexCoord sets
+    // UV 坐标集（默认使用主 UV 集 0）
     m_baseColorTexCoordSet.push_back(0);
     m_metallicRoughnessTexCoordSet.push_back(0);
     m_normalTexCoordSet.push_back(0);
@@ -54,7 +54,7 @@ void MaterialTable::InitializeDefaultMaterial() {
     m_emissiveTexCoordSet.push_back(0);
     m_transmissionTexCoordSet.push_back(0);
 
-    // Index references
+    // 索引引用（默认均无效）
     m_meshIndex.push_back(-1);
     m_materialIndex.push_back(-1);
     m_primitiveIndex.push_back(-1);
@@ -66,7 +66,7 @@ void MaterialTable::InitializeDefaultMaterial() {
 MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     MaterialHandle handle;
 
-    // Reuse free slot if available
+    // 优先复用空闲插槽（避免数组无限扩张）
     if (!m_freeSlots.empty()) {
         handle = m_freeSlots.front();
         m_freeSlots.pop_front();
@@ -74,10 +74,10 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         handle = static_cast<MaterialHandle>(m_count);
         m_count++;
 
-        // Append new slot to all SOA arrays
+        // 向所有 SOA 数组追加新插槽
         m_valid.push_back(true);
 
-        // PBR properties
+        // PBR 属性
         m_albedo.push_back(params.albedo);
         m_metallic.push_back(params.metallic);
         m_roughness.push_back(params.roughness);
@@ -91,7 +91,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         m_specularFactor.push_back(params.specularFactor);
         m_specularColorFactor.push_back(params.specularColorFactor);
 
-        // Texture indices
+        // 纹理索引
         m_baseColorTextureIndex.push_back(params.baseColorTextureIndex);
         m_metallicRoughnessTextureIndex.push_back(params.metallicRoughnessTextureIndex);
         m_normalTextureIndex.push_back(params.normalTextureIndex);
@@ -99,7 +99,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         m_emissiveTextureIndex.push_back(params.emissiveTextureIndex);
         m_transmissionTextureIndex.push_back(params.transmissionTextureIndex);
 
-        // Image indices
+        // 图像索引
         m_baseColorImageIndex.push_back(params.baseColorImageIndex);
         m_metallicRoughnessImageIndex.push_back(params.metallicRoughnessImageIndex);
         m_normalImageIndex.push_back(params.normalImageIndex);
@@ -107,7 +107,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         m_emissiveImageIndex.push_back(params.emissiveImageIndex);
         m_transmissionImageIndex.push_back(params.transmissionImageIndex);
 
-        // Sampler indices
+        // 采样器索引
         m_baseColorSamplerIndex.push_back(params.baseColorSamplerIndex);
         m_metallicRoughnessSamplerIndex.push_back(params.metallicRoughnessSamplerIndex);
         m_normalSamplerIndex.push_back(params.normalSamplerIndex);
@@ -115,7 +115,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         m_emissiveSamplerIndex.push_back(params.emissiveSamplerIndex);
         m_transmissionSamplerIndex.push_back(params.transmissionSamplerIndex);
 
-        // TexCoord sets
+        // UV 坐标集
         m_baseColorTexCoordSet.push_back(params.baseColorTexCoordSet);
         m_metallicRoughnessTexCoordSet.push_back(params.metallicRoughnessTexCoordSet);
         m_normalTexCoordSet.push_back(params.normalTexCoordSet);
@@ -123,7 +123,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         m_emissiveTexCoordSet.push_back(params.emissiveTexCoordSet);
         m_transmissionTexCoordSet.push_back(params.transmissionTexCoordSet);
 
-        // Index references
+        // 索引引用
         m_meshIndex.push_back(params.meshIndex);
         m_materialIndex.push_back(params.materialIndex);
         m_primitiveIndex.push_back(params.primitiveIndex);
@@ -132,10 +132,10 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
         return handle;
     }
 
-    // Update existing slot (for reused handle)
+    // 复用已有插槽：更新对应位置的所有 SOA 数组
     m_valid[handle] = true;
 
-    // PBR properties
+    // PBR 属性
     m_albedo[handle] = params.albedo;
     m_metallic[handle] = params.metallic;
     m_roughness[handle] = params.roughness;
@@ -149,7 +149,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     m_specularFactor[handle] = params.specularFactor;
     m_specularColorFactor[handle] = params.specularColorFactor;
 
-    // Texture indices
+    // 纹理索引
     m_baseColorTextureIndex[handle] = params.baseColorTextureIndex;
     m_metallicRoughnessTextureIndex[handle] = params.metallicRoughnessTextureIndex;
     m_normalTextureIndex[handle] = params.normalTextureIndex;
@@ -157,7 +157,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     m_emissiveTextureIndex[handle] = params.emissiveTextureIndex;
     m_transmissionTextureIndex[handle] = params.transmissionTextureIndex;
 
-    // Image indices
+    // 图像索引
     m_baseColorImageIndex[handle] = params.baseColorImageIndex;
     m_metallicRoughnessImageIndex[handle] = params.metallicRoughnessImageIndex;
     m_normalImageIndex[handle] = params.normalImageIndex;
@@ -165,7 +165,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     m_emissiveImageIndex[handle] = params.emissiveImageIndex;
     m_transmissionImageIndex[handle] = params.transmissionImageIndex;
 
-    // Sampler indices
+    // 采样器索引
     m_baseColorSamplerIndex[handle] = params.baseColorSamplerIndex;
     m_metallicRoughnessSamplerIndex[handle] = params.metallicRoughnessSamplerIndex;
     m_normalSamplerIndex[handle] = params.normalSamplerIndex;
@@ -173,7 +173,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     m_emissiveSamplerIndex[handle] = params.emissiveSamplerIndex;
     m_transmissionSamplerIndex[handle] = params.transmissionSamplerIndex;
 
-    // TexCoord sets
+    // UV 坐标集
     m_baseColorTexCoordSet[handle] = params.baseColorTexCoordSet;
     m_metallicRoughnessTexCoordSet[handle] = params.metallicRoughnessTexCoordSet;
     m_normalTexCoordSet[handle] = params.normalTexCoordSet;
@@ -181,7 +181,7 @@ MaterialHandle MaterialTable::AddMaterial(const MaterialParams& params) {
     m_emissiveTexCoordSet[handle] = params.emissiveTexCoordSet;
     m_transmissionTexCoordSet[handle] = params.transmissionTexCoordSet;
 
-    // Index references
+    // 索引引用
     m_meshIndex[handle] = params.meshIndex;
     m_materialIndex[handle] = params.materialIndex;
     m_primitiveIndex[handle] = params.primitiveIndex;
@@ -195,7 +195,7 @@ void MaterialTable::RemoveMaterial(MaterialHandle handle) {
         return;
     }
 
-    // Cannot remove default material (handle 0)
+    // 默认材质（句柄 0）不可被移除
     if (handle == 0) {
         return;
     }
@@ -214,222 +214,213 @@ bool MaterialTable::IsValid(MaterialHandle handle) const {
 // ========== PBR 属性访问 ==========
 
 const Vec3& MaterialTable::GetAlbedo(MaterialHandle handle) const {
-    if (!IsValid(handle)) {
-        static Vec3 defaultAlbedo(1.0, 1.0, 1.0);
-        return defaultAlbedo;
-    }
-    return m_albedo[handle];
+    static const Vec3 defaultAlbedo{1.0, 1.0, 1.0};
+    return GetProperty(handle, m_albedo, defaultAlbedo);
 }
 
 double MaterialTable::GetMetallic(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0.0;
-    return m_metallic[handle];
+    static const double defaultMetallic = 0.0;
+    return GetProperty(handle, m_metallic, defaultMetallic);
 }
 
 double MaterialTable::GetRoughness(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0.5;
-    return m_roughness[handle];
+    static const double defaultRoughness = 0.5;
+    return GetProperty(handle, m_roughness, defaultRoughness);
 }
 
 bool MaterialTable::GetDoubleSided(MaterialHandle handle) const {
-    if (!IsValid(handle)) return false;
-    return m_doubleSided[handle];
+    static const uint8_t defaultDoubleSided = 0;
+    return GetProperty(handle, m_doubleSided, defaultDoubleSided) != 0;
 }
 
 double MaterialTable::GetAlpha(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 1.0;
-    return m_alpha[handle];
+    static const double defaultAlpha = 1.0;
+    return GetProperty(handle, m_alpha, defaultAlpha);
 }
 
 double MaterialTable::GetTransmissionFactor(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0.0;
-    return m_transmissionFactor[handle];
+    static const double defaultTransmission = 0.0;
+    return GetProperty(handle, m_transmissionFactor, defaultTransmission);
 }
 
-int MaterialTable::GetAlphaMode(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_alphaMode[handle];
+GLTFAlphaMode MaterialTable::GetAlphaMode(MaterialHandle handle) const {
+    static const GLTFAlphaMode defaultAlphaMode = GLTFAlphaMode::Opaque;
+    return GetProperty(handle, m_alphaMode, defaultAlphaMode);
 }
 
 double MaterialTable::GetAlphaCutoff(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0.5;
-    return m_alphaCutoff[handle];
+    static const double defaultAlphaCutoff = 0.5;
+    return GetProperty(handle, m_alphaCutoff, defaultAlphaCutoff);
 }
 
 const Vec3& MaterialTable::GetEmissiveFactor(MaterialHandle handle) const {
-    if (!IsValid(handle)) {
-        static Vec3 defaultEmissive(0.0, 0.0, 0.0);
-        return defaultEmissive;
-    }
-    return m_emissiveFactor[handle];
+    static const Vec3 defaultEmissive{0.0, 0.0, 0.0};
+    return GetProperty(handle, m_emissiveFactor, defaultEmissive);
 }
 
 double MaterialTable::GetIOR(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 1.5;
-    return m_ior[handle];
+    static const double defaultIOR = 1.5;
+    return GetProperty(handle, m_ior, defaultIOR);
 }
 
 double MaterialTable::GetSpecularFactor(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 1.0;
-    return m_specularFactor[handle];
+    static const double defaultSpecularFactor = 1.0;
+    return GetProperty(handle, m_specularFactor, defaultSpecularFactor);
 }
 
 const Vec3& MaterialTable::GetSpecularColorFactor(MaterialHandle handle) const {
-    if (!IsValid(handle)) {
-        static Vec3 defaultSpecular(1.0, 1.0, 1.0);
-        return defaultSpecular;
-    }
-    return m_specularColorFactor[handle];
+    static const Vec3 defaultSpecular{1.0, 1.0, 1.0};
+    return GetProperty(handle, m_specularColorFactor, defaultSpecular);
 }
 
 // ========== 纹理索引访问 ==========
 
 int32_t MaterialTable::GetBaseColorTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_baseColorTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_baseColorTextureIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetMetallicRoughnessTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_metallicRoughnessTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_metallicRoughnessTextureIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetNormalTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_normalTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_normalTextureIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetOcclusionTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_occlusionTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_occlusionTextureIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetEmissiveTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_emissiveTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_emissiveTextureIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetTransmissionTextureIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_transmissionTextureIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_transmissionTextureIndex, defaultIndex);
 }
 
 // ========== 图像索引访问 ==========
 
 int32_t MaterialTable::GetBaseColorImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_baseColorImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_baseColorImageIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetMetallicRoughnessImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_metallicRoughnessImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_metallicRoughnessImageIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetNormalImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_normalImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_normalImageIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetOcclusionImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_occlusionImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_occlusionImageIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetEmissiveImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_emissiveImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_emissiveImageIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetTransmissionImageIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_transmissionImageIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_transmissionImageIndex, defaultIndex);
 }
 
 // ========== 采样器索引访问 ==========
 
 int32_t MaterialTable::GetBaseColorSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_baseColorSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_baseColorSamplerIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetMetallicRoughnessSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_metallicRoughnessSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_metallicRoughnessSamplerIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetNormalSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_normalSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_normalSamplerIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetOcclusionSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_occlusionSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_occlusionSamplerIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetEmissiveSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_emissiveSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_emissiveSamplerIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetTransmissionSamplerIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_transmissionSamplerIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_transmissionSamplerIndex, defaultIndex);
 }
 
 // ========== 纹理坐标集访问 ==========
 
 int32_t MaterialTable::GetBaseColorTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_baseColorTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_baseColorTexCoordSet, defaultTexCoordSet);
 }
 
 int32_t MaterialTable::GetMetallicRoughnessTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_metallicRoughnessTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_metallicRoughnessTexCoordSet, defaultTexCoordSet);
 }
 
 int32_t MaterialTable::GetNormalTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_normalTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_normalTexCoordSet, defaultTexCoordSet);
 }
 
 int32_t MaterialTable::GetOcclusionTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_occlusionTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_occlusionTexCoordSet, defaultTexCoordSet);
 }
 
 int32_t MaterialTable::GetEmissiveTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_emissiveTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_emissiveTexCoordSet, defaultTexCoordSet);
 }
 
 int32_t MaterialTable::GetTransmissionTexCoordSet(MaterialHandle handle) const {
-    if (!IsValid(handle)) return 0;
-    return m_transmissionTexCoordSet[handle];
+    static const int32_t defaultTexCoordSet = 0;
+    return GetProperty(handle, m_transmissionTexCoordSet, defaultTexCoordSet);
 }
 
 // ========== 索引引用访问 ==========
 
 int32_t MaterialTable::GetMeshIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_meshIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_meshIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetMaterialIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_materialIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_materialIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetPrimitiveIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_primitiveIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_primitiveIndex, defaultIndex);
 }
 
 int32_t MaterialTable::GetNodeIndex(MaterialHandle handle) const {
-    if (!IsValid(handle)) return -1;
-    return m_nodeIndex[handle];
+    static const int32_t defaultIndex = -1;
+    return GetProperty(handle, m_nodeIndex, defaultIndex);
 }
 
 PBRMaterial MaterialTable::GetPBRMaterial(MaterialHandle handle) const {
@@ -438,7 +429,7 @@ PBRMaterial MaterialTable::GetPBRMaterial(MaterialHandle handle) const {
         return mat;
     }
 
-    // Only copy basic PBR properties (PBRMaterial struct doesn't have texture indices)
+    // 仅复制基础 PBR 属性（PBRMaterial 结构体不含纹理索引字段）
     mat.albedo = m_albedo[handle];
     mat.metallic = m_metallic[handle];
     mat.roughness = m_roughness[handle];
@@ -506,7 +497,7 @@ void MaterialTable::Clear() {
     m_freeSlots.clear();
     m_count = 0;
 
-    // Reinitialize default material
+    // 清空后重新初始化默认材质（插槽 0）
     InitializeDefaultMaterial();
 }
 

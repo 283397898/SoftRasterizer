@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Pipeline/RenderPass.h"
-#include "Pipeline/Rasterizer.h"
 
 namespace SR {
 
@@ -49,13 +48,6 @@ public:
     int GetPriority() const override {
         return 300; // 透明物体在天空盒之后渲染
     }
-
-    void SetDeferredTriangles(std::vector<Triangle>* triangles) {
-        m_deferredTriangles = triangles;
-    }
-
-private:
-    std::vector<Triangle>* m_deferredTriangles = nullptr;
 };
 
 /**

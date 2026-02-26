@@ -1,20 +1,12 @@
 #include "Render/RenderPipeline.h"
 
-#include "Pipeline/GeometryProcessor.h"
-#include "Pipeline/Rasterizer.h"
-#include "Pipeline/EnvironmentMap.h"
 #include "Pipeline/MaterialTable.h"
 #include "Pipeline/OpaquePass.h"
+#include "Pipeline/PassBuilder.h"
+#include "Pipeline/Rasterizer.h"
+#include "Utils/DebugLog.h"
 
-#include <algorithm>
-#include <cmath>
-#include <chrono>
 #include <vector>
-#include <omp.h>
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 namespace SR {
 
@@ -31,14 +23,14 @@ RenderStats RenderPipeline::ExecutePasses(std::vector<std::unique_ptr<RenderPass
     for (auto& pass : passes) {
         if (!pass) continue;
 
-        // Check if pass should execute
+        // 检查 Pass 是否满足执行条件（如 SkyboxPass 要求环境贴图已加载）
         if (!pass->ShouldExecute(context)) {
             continue;
         }
 
         PassStats passStats = ExecutePass(*pass, context);
 
-        // Aggregate stats
+        // 累加各 Pass 的统计信息
         totalStats.buildMs += passStats.buildMs;
         totalStats.rastMs += passStats.rastMs;
         totalStats.trianglesBuilt += passStats.trianglesBuilt;
@@ -52,317 +44,51 @@ RenderStats RenderPipeline::ExecutePasses(std::vector<std::unique_ptr<RenderPass
 }
 
 /**
- * @brief 执行单个 Pass
+ * @brief 执行单个 Pass 并输出调试日志
  */
 PassStats RenderPipeline::ExecutePass(RenderPass& pass, RenderContext& context) const {
     char debugMsg[256];
-    snprintf(debugMsg, sizeof(debugMsg), "RenderPipeline: Executing pass '%s'\n", pass.GetName().c_str());
-    OutputDebugStringA(debugMsg);
+    snprintf(debugMsg, sizeof(debugMsg), "RenderPipeline: 执行 Pass '%s'\n", pass.GetName().c_str());
+    SR_DEBUG_LOG(debugMsg);
 
     return pass.Execute(context);
 }
 
 /**
- * @brief 执行每一帧的准备工作，目前主要用于清除帧缓冲和深度缓冲
- * @param pass 当前 Pass 上下文
- */
-void RenderPipeline::Prepare(const PassContext& pass) const {
-    if (!pass.framebuffer || !pass.depthBuffer) {
-        return;
-    }
-}
-
-/**
- * @brief 内部绘制实现，使用外部提供的 MaterialTable
- */
-RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pass,
-                                  std::vector<Triangle>* outDeferredBlend) const {
-    // Create MaterialTable for this frame - must live through entire render process
-    MaterialTable materialTable;
-    return DrawWithMaterialTable(queue, pass, materialTable, outDeferredBlend);
-}
-
-/**
- * @brief 执行绘制流程：遍历渲染队列，调用几何处理器和光栅化器
- * @param queue 渲染项目队列
- * @param pass 当前 Pass 上下文
- * @param materialTable 材质表 (必须在整个绘制期间保持有效)
- * @param outDeferredBlend 如果非空，透明三角形不在此处光栅化，而是输出到该容器中
- * @return 绘制过程中的统计数据 (耗时、三角形数等)
- */
-RenderStats RenderPipeline::DrawWithMaterialTable(const RenderQueue& queue, const PassContext& pass,
-                                                   MaterialTable& materialTable,
-                                                   std::vector<Triangle>* outDeferredBlend) const {
-    RenderStats stats{};
-
-    if (!pass.framebuffer || !pass.depthBuffer) {
-        return stats;
-    }
-
-    OutputDebugStringA("RenderPipeline Draw: begin\n");
-
-    // Create frame context with material table
-    FrameContext frameWithMaterials = pass.frame;
-    frameWithMaterials.materialTable = &materialTable;
-
-    Rasterizer rasterizer;
-    rasterizer.SetTargets(pass.framebuffer, pass.depthBuffer);
-    rasterizer.SetFrameContext(frameWithMaterials);
-
-    GeometryProcessor geometryProcessor;
-    std::vector<Triangle> itemTriangles;
-    std::vector<Triangle> opaqueMaskTriangles;
-    std::vector<Triangle> blendTriangles;
-
-    using Clock = std::chrono::high_resolution_clock;
-
-    // Build a sorted list: opaque first, then blend back-to-front.
-    std::vector<DrawItem> sortedItems = queue.GetItems();
-    const Vec3 cameraPos = pass.frame.cameraPos;
-    auto getItemSortKey = [&cameraPos](const DrawItem& item) {
-        Vec3 pos{item.modelMatrix.m[3][0], item.modelMatrix.m[3][1], item.modelMatrix.m[3][2]};
-        Vec3 d = pos - cameraPos;
-        return d.x * d.x + d.y * d.y + d.z * d.z;
-    };
-    std::stable_sort(sortedItems.begin(), sortedItems.end(),
-        [&getItemSortKey](const DrawItem& a, const DrawItem& b) {
-            int alphaModeA = a.material ? a.material->alphaMode : 0;
-            int alphaModeB = b.material ? b.material->alphaMode : 0;
-            if (alphaModeA != alphaModeB) {
-                return alphaModeA < alphaModeB;
-            }
-            if (alphaModeA == 2) {
-                return getItemSortKey(a) > getItemSortKey(b);
-            }
-            if (a.material != b.material) {
-                return a.material < b.material;
-            }
-            return a.mesh < b.mesh;
-        });
-
-    // 遍历渲染队列中每一个绘制项，先做几何阶段并按 alphaMode 分批（多线程并行）
-    const int numItems = static_cast<int>(sortedItems.size());
-    const int maxThreads = omp_get_max_threads();
-
-    // 每线程独立的三角形收集列表，避免锁竞争
-    std::vector<std::vector<Triangle>> perThreadOpaque(maxThreads);
-    std::vector<std::vector<Triangle>> perThreadBlend(maxThreads);
-    std::vector<uint64_t> perThreadBuilt(maxThreads, 0);
-
-    auto buildStart = Clock::now();
-
-    #pragma omp parallel
-    {
-        const int tid = omp_get_thread_num();
-        auto& localOpaque = perThreadOpaque[tid];
-        auto& localBlend = perThreadBlend[tid];
-        GeometryProcessor localGP;
-        std::vector<Triangle> localItemTriangles;
-
-        #pragma omp for schedule(dynamic, 1)
-        for (int i = 0; i < numItems; ++i) {
-            const DrawItem& item = sortedItems[static_cast<size_t>(i)];
-            if (!item.mesh || !item.material) {
-                continue;
-            }
-
-            localGP.BuildTriangles(
-                *item.mesh,
-                *item.material,
-                item,
-                item.modelMatrix,
-                item.normalMatrix,
-                frameWithMaterials,
-                materialTable,
-                localItemTriangles);
-
-            perThreadBuilt[tid] += localGP.GetLastTriangleCount();
-
-            if (localItemTriangles.empty()) {
-                continue;
-            }
-
-            const int alphaMode = item.material ? item.material->alphaMode : 0;
-            if (alphaMode == 2) {
-                localBlend.insert(localBlend.end(), localItemTriangles.begin(), localItemTriangles.end());
-            } else {
-                localOpaque.insert(localOpaque.end(), localItemTriangles.begin(), localItemTriangles.end());
-            }
-        }
-    }
-
-    auto buildEnd = Clock::now();
-    stats.buildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
-
-    // 合并各线程结果
-    for (int t = 0; t < maxThreads; ++t) {
-        stats.trianglesBuilt += perThreadBuilt[t];
-        if (!perThreadOpaque[t].empty()) {
-            opaqueMaskTriangles.insert(opaqueMaskTriangles.end(),
-                std::make_move_iterator(perThreadOpaque[t].begin()),
-                std::make_move_iterator(perThreadOpaque[t].end()));
-        }
-        if (!perThreadBlend[t].empty()) {
-            blendTriangles.insert(blendTriangles.end(),
-                std::make_move_iterator(perThreadBlend[t].begin()),
-                std::make_move_iterator(perThreadBlend[t].end()));
-        }
-    }
-
-    // 2. 光栅化处理阶段：按批次进行，避免每个 DrawItem 重复做 tile 预处理
-    auto rasterizeBatch = [&](const std::vector<Triangle>& batch) {
-        if (batch.empty()) {
-            return;
-        }
-        auto rastStart = Clock::now();
-        RasterStats rastStats = rasterizer.RasterizeTriangles(batch);
-        auto rastEnd = Clock::now();
-        stats.rastMs += std::chrono::duration<double, std::milli>(rastEnd - rastStart).count();
-        stats.trianglesClipped += rastStats.trianglesClipped;
-        stats.trianglesRaster += rastStats.trianglesRaster;
-        stats.pixelsTested += rastStats.pixelsTested;
-        stats.pixelsShaded += rastStats.pixelsShaded;
-    };
-
-    rasterizeBatch(opaqueMaskTriangles);
-
-    if (outDeferredBlend) {
-        // 透明三角形延迟到天空盒渲染之后
-        *outDeferredBlend = std::move(blendTriangles);
-    } else {
-        rasterizeBatch(blendTriangles);
-    }
-
-    OutputDebugStringA("RenderPipeline Draw: end\n");
-
-    return stats;
-}
-
-/**
- * @brief 串联起完整的渲染过程
+ * @brief 传统路径：通过 PassContext 执行默认管线
  *
- * 渲染顺序：
- *   1. Prepare        — 清除缓冲区
- *   2. Draw           — 不透明 + 透明几何构建 & 不透明光栅化
- *                       （内部先光栅化不透明批次，返回透明批次）
- *   3. RenderSkybox   — 天空盒（仅填充深度 == 1.0 的远平面像素）
- *   4. 透明光栅化      — 在天空盒之上混合透明几何
- *   5. PostProcess     — 色调映射、FXAA 等
- *
- * 这样保证透明物体能正确混合在天空盒之上，而不被天空盒覆盖。
+ * 创建帧级 MaterialTable 和延迟混合三角形缓冲，
+ * 使用 DefaultPipeline::Create() 构建标准管线并执行。
  */
 RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& pass) const {
-    Prepare(pass);
-
-    // Create MaterialTable at Render level to ensure it lives through entire frame
-    MaterialTable materialTable;
-
-    // Create frame context with material table
-    FrameContext frameWithMaterials = pass.frame;
-    frameWithMaterials.materialTable = &materialTable;
-
-    // Draw 内部：先光栅化不透明批次，返回待渲染的透明三角形
-    std::vector<Triangle> deferredBlend;
-    RenderStats stats = DrawWithMaterialTable(queue, pass, materialTable, &deferredBlend);
-
-    // 天空盒填充未被不透明几何覆盖的像素
-    RenderSkybox(pass);
-
-    // 在天空盒之上光栅化透明几何
-    if (!deferredBlend.empty()) {
-        Rasterizer rasterizer;
-        rasterizer.SetTargets(pass.framebuffer, pass.depthBuffer);
-        rasterizer.SetFrameContext(frameWithMaterials);
-
-        using Clock = std::chrono::high_resolution_clock;
-        auto rastStart = Clock::now();
-        RasterStats rastStats = rasterizer.RasterizeTriangles(deferredBlend);
-        auto rastEnd = Clock::now();
-        stats.rastMs += std::chrono::duration<double, std::milli>(rastEnd - rastStart).count();
-        stats.trianglesClipped += rastStats.trianglesClipped;
-        stats.trianglesRaster += rastStats.trianglesRaster;
-        stats.pixelsTested += rastStats.pixelsTested;
-        stats.pixelsShaded += rastStats.pixelsShaded;
+    // 清除缓冲区（传统路径由管线自身负责清除）
+    if (pass.framebuffer && pass.depthBuffer) {
+        pass.framebuffer->ClearLinear(Vec3{0.0, 0.0, 0.0});
+        pass.depthBuffer->Clear(1.0);
     }
 
-    PostProcess(pass);
-    return stats;
-}
+    // 创建帧级 MaterialTable（SOA 布局，生命周期覆盖整帧）
+    MaterialTable materialTable;
+    std::vector<Triangle> deferredBlend;  // OpaquePass 产出，TransparentPass 消费
 
-/**
- * @brief 天空盒渲染：对深度仍为远平面的像素，用环境贴图采样填充背景
- */
-void RenderPipeline::RenderSkybox(const PassContext& pass) const {
-    const EnvironmentMap* envMap = pass.frame.environmentMap;
-    if (!envMap || !envMap->IsLoaded()) return;
-    if (!pass.framebuffer || !pass.depthBuffer) return;
-
-    OutputDebugStringA("RenderPipeline: rendering skybox\n");
-
-    const int width = pass.framebuffer->GetWidth();
-    const int height = pass.framebuffer->GetHeight();
-    const double* depthData = pass.depthBuffer->Data();
-    Vec3* linearPixels = pass.framebuffer->GetLinearPixelsWritable();
-
-    // 逆 VP 矩阵：从 NDC 还原世界方向（行向量约定：VP = View * Projection）
-    Mat4 vp = pass.frame.view * pass.frame.projection;
-    Mat4 invVP = vp.Inverse();
-
-    const Vec3& camPos = pass.frame.cameraPos;
-
-    #pragma omp parallel for schedule(static)
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            size_t idx = static_cast<size_t>(y) * width + x;
-            // 仅处理深度 == 1.0（远平面）的像素，即无几何体覆盖的区域
-            if (depthData[idx] < 0.9999) continue;
-
-            // 屏幕坐标 → NDC
-            double ndcX = (2.0 * (x + 0.5) / width) - 1.0;
-            double ndcY = 1.0 - (2.0 * (y + 0.5) / height);
-
-            // 在近平面和远平面上分别反投影得到世界空间点
-            // NDC z=0 (近平面), z=1 (远平面)，DirectX 约定
-            Vec4 nearClip{ndcX, ndcY, 0.0, 1.0};
-            Vec4 farClip{ndcX, ndcY, 1.0, 1.0};
-            Vec4 nearWorld = invVP.Multiply(nearClip);
-            Vec4 farWorld = invVP.Multiply(farClip);
-
-            if (std::abs(nearWorld.w) < 1e-12 || std::abs(farWorld.w) < 1e-12) continue;
-
-            Vec3 nearPt{nearWorld.x / nearWorld.w, nearWorld.y / nearWorld.w, nearWorld.z / nearWorld.w};
-            Vec3 farPt{farWorld.x / farWorld.w, farWorld.y / farWorld.w, farWorld.z / farWorld.w};
-
-            Vec3 dir{farPt.x - nearPt.x, farPt.y - nearPt.y, farPt.z - nearPt.z};
-            double len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-            if (len > 1e-12) {
-                double inv = 1.0 / len;
-                dir.x *= inv; dir.y *= inv; dir.z *= inv;
-            }
-
-            Vec3 skyColor = envMap->SampleDirection(dir);
-            linearPixels[idx] = skyColor;
+    // 构建默认管线并配置后处理参数
+    auto passes = DefaultPipeline::Create();
+    for (auto& passPtr : passes) {
+        if (auto* post = dynamic_cast<PostProcessPass*>(passPtr.get())) {
+            post->SetFXAAEnabled(pass.enableFXAA);
+            post->SetToneMappingEnabled(pass.enableToneMap);
+            post->SetExposure(pass.exposure);
         }
     }
-}
 
-/**
- * @brief 后处理流程：FXAA 抗锯齿和色调映射/解析
- */
-void RenderPipeline::PostProcess(const PassContext& pass) const {
-    if (!pass.framebuffer) {
-        return;
-    }
-
-    // 执行快速近似抗锯齿
-    if (pass.enableFXAA) {
-        pass.framebuffer->ApplyFXAA();
-    }
-
-    // 执行 HDR 到 SDR 的转换和 sRGB 校正
-    if (pass.enableToneMap) {
-        pass.framebuffer->ResolveToSRGB(pass.exposure, false);
-    }
+    RenderContext context{};
+    context.framebuffer = pass.framebuffer;
+    context.depthBuffer = pass.depthBuffer;
+    context.renderQueue = &queue;
+    context.frameContext = &pass.frame;
+    context.deferredBlendTriangles = &deferredBlend;
+    context.materialTable = &materialTable;
+    return ExecutePasses(passes, context);
 }
 
 } // namespace SR

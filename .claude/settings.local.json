@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /c/Users/isis/Desktop/SoftRasterizer && openspec new change \"arch-comprehensive-optimization\" 2>&1)",
+      "Bash(cd /c/Users/isis/Desktop/SoftRasterizer && openspec status --change \"arch-comprehensive-optimization\" --json 2>&1)",
+      "Bash(cd /c/Users/isis/Desktop/SoftRasterizer && openspec instructions proposal --change \"arch-comprehensive-optimization\" --json 2>&1)",
+      "Bash(cd /c/Users/isis/Desktop/SoftRasterizer && openspec instructions design --change \"arch-comprehensive-optimization\" --json 2>&1)",
+      "Bash(cd /c/Users/isis/Desktop/SoftRasterizer && openspec instructions specs --change \"arch-comprehensive-optimization\" --json 2>&1)",
+      "Bash(cd C:\\\\Users\\\\isis\\\\Desktop\\\\SoftRasterizer:*)",
+      "Bash(cd:*)"
+    ]
+  }
+}

@@ -28,7 +28,7 @@ struct MaterialParams {
     bool doubleSided = false;
     double alpha = 1.0;
     double transmissionFactor = 0.0;
-    int alphaMode = 0;
+    GLTFAlphaMode alphaMode = GLTFAlphaMode::Opaque;
     double alphaCutoff = 0.5;
     Vec3 emissiveFactor{0.0, 0.0, 0.0};
     double ior = 1.5;
@@ -146,7 +146,7 @@ public:
     bool GetDoubleSided(MaterialHandle handle) const;
     double GetAlpha(MaterialHandle handle) const;
     double GetTransmissionFactor(MaterialHandle handle) const;
-    int GetAlphaMode(MaterialHandle handle) const;
+    GLTFAlphaMode GetAlphaMode(MaterialHandle handle) const;
     double GetAlphaCutoff(MaterialHandle handle) const;
     const Vec3& GetEmissiveFactor(MaterialHandle handle) const;
     double GetIOR(MaterialHandle handle) const;
@@ -211,6 +211,14 @@ public:
 private:
     void InitializeDefaultMaterial();
 
+    template<typename T>
+    const T& GetProperty(MaterialHandle handle, const std::vector<T>& storage, const T& defaultValue) const {
+        if (!IsValid(handle)) {
+            return defaultValue;
+        }
+        return storage[handle];
+    }
+
     // 有效性标记
     std::vector<bool> m_valid;
 
@@ -218,10 +226,10 @@ private:
     std::vector<Vec3> m_albedo;
     std::vector<double> m_metallic;
     std::vector<double> m_roughness;
-    std::vector<bool> m_doubleSided;
+    std::vector<uint8_t> m_doubleSided;
     std::vector<double> m_alpha;
     std::vector<double> m_transmissionFactor;
-    std::vector<int> m_alphaMode;
+    std::vector<GLTFAlphaMode> m_alphaMode;
     std::vector<double> m_alphaCutoff;
     std::vector<Vec3> m_emissiveFactor;
     std::vector<double> m_ior;

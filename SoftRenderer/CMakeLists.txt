@@ -5,7 +5,6 @@ add_library(SoftRenderer SHARED
     src/Asset/EXRDecoder.cpp
     src/Renderer.cpp
     src/Math/Vec2.cpp
-    src/Math/Vec3.cpp
     src/Math/Vec4.cpp
     src/Math/Mat4.cpp
     src/Core/Framebuffer.cpp
@@ -25,10 +24,10 @@ add_library(SoftRenderer SHARED
     src/Pipeline/MaterialTable.cpp
     src/Pipeline/OpaquePass.cpp
     src/Pipeline/PassBuilder.cpp
+    src/Utils/Compression.cpp
     src/Runtime/GPUScene.cpp
     src/Runtime/GPUSceneBuilder.cpp
     src/Scene/Scene.cpp
-    src/Scene/SceneManager.cpp
     src/Scene/ObjectGroup.cpp
     src/Scene/LightGroup.cpp
     src/Scene/Mesh.cpp

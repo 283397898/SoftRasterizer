@@ -1,20 +1,67 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  ## 项目
+  SoftRasterizer — 纯 C++20 CPU 软件光栅化器，复刻现代 GPU 管线（DirectX 风格）。
+  分为 SoftRenderer (DLL, 命名空间 SR) 和 MFCDemo (仅用 D3D12 做最终呈现) 两部分。
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  ## 技术栈
+  - C++20, CMake, MSVC (Windows SDK)
+  - SIMD: AVX2 (`__m256d`, double 精度)
+  - 并行: OpenMP (`#pragma omp parallel for schedule(dynamic)`)
+  - 数学: 项目自带 SR::Vec3/Vec4/Mat4, Column-Major, double 精度
+  - NDC: DirectX 风格 Z ∈ [0, 1]
+
+  ## 渲染管线
+  Geometry → Clipper (Sutherland-Hodgman) → Rasterizer (Tile 32×32, SIMD, Early-Z)
+  → Fragment (PBR Cook-Torrance: GGX + Smith + Fresnel-Schlick) → PostProcess (FXAA, ACES/Reinhard, sRGB)
+
+  ## 数据流
+  Scene → GPUScene (扁平化) → RenderQueue → Rasterizer → Framebuffer
+
+  ## 核心架构
+  - MaterialTable: SOA 布局材质存储, MaterialHandle (uint32_t) 索引
+  - ResourcePool<T>: 泛型资源池, 世代句柄 + LRU 淘汰
+  - PassBuilder: Builder 模式配置渲染 Pass, 拓扑排序依赖解析
+  - RenderPass: OpaquePass / TransparentPass / SkyboxPass / PostProcessPass
+
+  ## 关键约束
+  - 零外部图形/数学库依赖 (无 GLM, 无 GL/DX 渲染接口)
+  - 默认 double 精度浮点
+  - 导出类使用 SR_API 宏
+  - 无锁设计: 几何处理阶段禁止 std::mutex, 光栅化使用原子操作
+  - Release 构建是性能关键 (SIMD 内联优化依赖此配置)
+
+  ## 命名规范
+  | 类型 | 风格 | 示例 |
+  |------|------|------|
+  | 类/结构体 | PascalCase | Renderer, Texture |
+  | 函数 | PascalCase | Initialize, SetPixel |
+  | 变量 | camelCase | width, lightDir |
+  | 私有成员 | m_ + camelCase | m_width, m_framebuffer |
+  | 文件 | PascalCase | Renderer.cpp, Vec3.h |
+
+  ## 目录布局
+  - Pipeline 组件: SoftRenderer/include/Pipeline/ + src/Pipeline/
+  - Math 工具: SoftRenderer/include/Math/ + src/Math/
+  - Scene 相关: SoftRenderer/include/Scene/ + src/Scene/
+  - Runtime 资源: SoftRenderer/include/Runtime/ + src/Runtime/
+
+rules:
+  proposal:
+    - 用中文简体撰写
+    - 控制在 1-2 页内，聚焦"为什么"而非"怎么做"
+    - Capabilities 部分必须明确列出新增和修改的 spec 名称
+  design:
+    - 用中文简体撰写
+    - 必须包含替代方案对比和选型理由
+    - 性能敏感的决策需要估算量级 (ns/us/ms)
+    - 涉及并行策略变更时必须说明线程安全保证
+  specs:
+    - 需求使用 SHALL/MUST 规范性语言
+    - 每个 Requirement 至少一个 Scenario (WHEN/THEN 格式)
+    - SIMD/并行相关需求需注明精度和线程安全约束
+  tasks:
+    - 每个任务粒度不超过 1 个文件的修改
+    - 最后一组任务必须包含编译验证步骤
+    - 涉及接口变更时需列出所有受影响的调用点

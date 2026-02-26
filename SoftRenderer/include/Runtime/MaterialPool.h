@@ -85,7 +85,7 @@ public:
         if (mat) {
             mat->albedo = albedo;
             mat->alpha = alpha;
-            mat->alphaMode = 2; // Blend
+            mat->alphaMode = GLTFAlphaMode::Blend;
         }
         return h;
     }

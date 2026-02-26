@@ -1,13 +1,14 @@
 #pragma once
 
-#include <vector>
 #include <deque>
 #include <list>
 #include <memory>
-#include <cstdint>
 #include <cstddef>
-#include <functional>
 #include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <unordered_map>
+#include <vector>
 
 namespace SR {
 
@@ -25,13 +26,29 @@ namespace SR {
 template<typename T>
 class ResourcePool {
 public:
-    using Handle = uint32_t;
-    static constexpr Handle InvalidHandle = UINT32_MAX;
+    struct Handle {
+        uint32_t packed = 0xFFFFFFFFu;
+
+        constexpr Handle() = default;
+        constexpr explicit Handle(uint32_t value) : packed(value) {}
+
+        constexpr uint16_t Index() const { return static_cast<uint16_t>(packed & 0xFFFFu); }
+        constexpr uint16_t Generation() const { return static_cast<uint16_t>((packed >> 16) & 0xFFFFu); }
+        constexpr bool IsInvalid() const { return packed == 0xFFFFFFFFu; }
+
+        static constexpr Handle Pack(uint16_t index, uint16_t generation) {
+            return Handle((static_cast<uint32_t>(generation) << 16) | static_cast<uint32_t>(index));
+        }
+
+        constexpr bool operator==(const Handle&) const = default;
+    };
+
+    static constexpr Handle InvalidHandle = Handle{};
 
     ResourcePool() = default;
     ~ResourcePool() = default;
 
-    // Non-copyable, movable
+    // 禁止拷贝，允许移动
     ResourcePool(const ResourcePool&) = delete;
     ResourcePool& operator=(const ResourcePool&) = delete;
     ResourcePool(ResourcePool&&) = default;
@@ -44,29 +61,25 @@ public:
      */
     template<typename... Args>
     Handle Allocate(Args&&... args) {
-        Handle handle;
+        uint16_t index = 0;
 
         if (!m_freeList.empty()) {
-            // Reuse free slot
-            handle = m_freeList.front();
+            index = m_freeList.front();
             m_freeList.pop_front();
-            m_resources[handle] = std::make_unique<T>(std::forward<Args>(args)...);
-            m_generation[handle]++;
-            m_alive[handle] = true;
+            m_resources[index] = std::make_unique<T>(std::forward<Args>(args)...);
+            m_alive[index] = 1;
         } else {
-            // Allocate new slot
-            handle = static_cast<Handle>(m_resources.size());
+            if (m_resources.size() >= static_cast<size_t>(UINT16_MAX) + 1) {
+                return InvalidHandle;
+            }
+            index = static_cast<uint16_t>(m_resources.size());
             m_resources.push_back(std::make_unique<T>(std::forward<Args>(args)...));
             m_generation.push_back(0);
-            m_alive.push_back(true);
-            m_lastAccess.push_back(0);
+            m_alive.push_back(1);
         }
 
-        // Update LRU
-        Touch(handle);
-        m_accessCounter++;
-
-        return handle;
+        Touch(index);
+        return Handle::Pack(index, m_generation[index]);
     }
 
     /**
@@ -78,15 +91,12 @@ public:
             return;
         }
 
-        m_alive[handle] = false;
-        m_resources[handle].reset();
-        m_freeList.push_back(handle);
-
-        // Remove from LRU list
-        m_lruList.erase(
-            std::remove(m_lruList.begin(), m_lruList.end(), handle),
-            m_lruList.end()
-        );
+        uint16_t index = handle.Index();
+        m_alive[index] = 0;
+        m_resources[index].reset();
+        m_generation[index] = static_cast<uint16_t>(m_generation[index] + 1);
+        m_freeList.push_back(index);
+        RemoveFromLRU(index);
     }
 
     /**
@@ -98,8 +108,9 @@ public:
         if (!IsValid(handle)) {
             return nullptr;
         }
-        Touch(handle);
-        return m_resources[handle].get();
+        uint16_t index = handle.Index();
+        Touch(index);
+        return m_resources[index].get();
     }
 
     /**
@@ -111,7 +122,7 @@ public:
         if (!IsValid(handle)) {
             return nullptr;
         }
-        return m_resources[handle].get();
+        return m_resources[handle.Index()].get();
     }
 
     /**
@@ -120,10 +131,14 @@ public:
      * @return true 如果有效
      */
     bool IsValid(Handle handle) const {
-        if (handle == InvalidHandle || handle >= m_resources.size()) {
+        if (handle.IsInvalid()) {
             return false;
         }
-        return m_alive[handle];
+        uint16_t index = handle.Index();
+        if (index >= m_resources.size()) {
+            return false;
+        }
+        return m_alive[index] != 0 && m_generation[index] == handle.Generation();
     }
 
     /**
@@ -155,8 +170,8 @@ public:
      */
     void EvictLRU() {
         while (m_memoryUsage > m_memoryBudget && !m_lruList.empty()) {
-            Handle oldest = m_lruList.front();
-            Release(oldest);
+            uint16_t oldest = m_lruList.front();
+            Release(Handle::Pack(oldest, m_generation[oldest]));
         }
     }
 
@@ -175,11 +190,10 @@ public:
         m_resources.clear();
         m_generation.clear();
         m_alive.clear();
-        m_lastAccess.clear();
         m_freeList.clear();
         m_lruList.clear();
+        m_lruMap.clear();
         m_memoryUsage = 0;
-        m_accessCounter = 0;
     }
 
     /**
@@ -187,9 +201,9 @@ public:
      * @param callback 对每个活跃资源调用的回调函数
      */
     void ForEach(const std::function<void(Handle, T*)>& callback) {
-        for (Handle h = 0; h < m_resources.size(); ++h) {
-            if (m_alive[h] && m_resources[h]) {
-                callback(h, m_resources[h].get());
+        for (size_t i = 0; i < m_resources.size(); ++i) {
+            if (m_alive[i] != 0 && m_resources[i]) {
+                callback(Handle::Pack(static_cast<uint16_t>(i), m_generation[i]), m_resources[i].get());
             }
         }
     }
@@ -199,9 +213,9 @@ public:
      * @param callback 对每个活跃资源调用的回调函数
      */
     void ForEach(const std::function<void(Handle, const T*)>& callback) const {
-        for (Handle h = 0; h < m_resources.size(); ++h) {
-            if (m_alive[h] && m_resources[h]) {
-                callback(h, m_resources[h].get());
+        for (size_t i = 0; i < m_resources.size(); ++i) {
+            if (m_alive[i] != 0 && m_resources[i]) {
+                callback(Handle::Pack(static_cast<uint16_t>(i), m_generation[i]), m_resources[i].get());
             }
         }
     }
@@ -215,39 +229,47 @@ public:
         if (!IsValid(handle)) {
             return;
         }
-        // Note: This is a simple implementation. For accurate tracking,
-        // each resource should report its own size.
+        // 简单实现：重新遍历计算，精确追踪需各资源自报大小
         m_memoryUsage = 0;
         for (const auto& res : m_resources) {
             if (res) {
-                m_memoryUsage += sizeof(T); // Simplified
+                m_memoryUsage += sizeof(T); // 简化估算
             }
         }
     }
 
 private:
-    void Touch(Handle handle) {
-        m_lastAccess[handle] = ++m_accessCounter;
+    void RemoveFromLRU(uint16_t index) {
+        auto it = m_lruMap.find(index);
+        if (it == m_lruMap.end()) {
+            return;
+        }
+        m_lruList.erase(it->second);
+        m_lruMap.erase(it);
+    }
 
-        // Move to end of LRU list (most recently used)
-        m_lruList.erase(
-            std::remove(m_lruList.begin(), m_lruList.end(), handle),
-            m_lruList.end()
-        );
-        m_lruList.push_back(handle);
+    void Touch(uint16_t index) {
+        auto it = m_lruMap.find(index);
+        if (it != m_lruMap.end()) {
+            m_lruList.splice(m_lruList.end(), m_lruList, it->second);
+            return;
+        }
+        m_lruList.push_back(index);
+        auto tail = m_lruList.end();
+        --tail;
+        m_lruMap[index] = tail;
     }
 
     std::vector<std::unique_ptr<T>> m_resources;
-    std::vector<uint32_t> m_generation;  ///< 用于检测过期句柄
-    std::vector<bool> m_alive;
-    std::vector<uint64_t> m_lastAccess;
+    std::vector<uint16_t> m_generation;  ///< 用于检测过期句柄
+    std::vector<uint8_t> m_alive;
 
-    std::deque<Handle> m_freeList;       ///< 空闲槽位列表
-    std::list<Handle> m_lruList;         ///< LRU 顺序列表
+    std::deque<uint16_t> m_freeList;     ///< 空闲槽位列表
+    std::list<uint16_t> m_lruList;       ///< LRU 顺序列表
+    std::unordered_map<uint16_t, typename std::list<uint16_t>::iterator> m_lruMap;
 
     size_t m_memoryUsage = 0;
     size_t m_memoryBudget = SIZE_MAX;
-    uint64_t m_accessCounter = 0;
 };
 
 } // namespace SR

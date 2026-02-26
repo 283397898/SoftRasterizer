@@ -1,32 +1,9 @@
 #include "Pipeline/Clipper.h"
+#include "Utils/MathUtils.h"
 
 namespace SR {
 
 namespace {
-
-Vec4 Lerp(const Vec4& a, const Vec4& b, double t) {
-    return Vec4{
-        a.x + (b.x - a.x) * t,
-        a.y + (b.y - a.y) * t,
-        a.z + (b.z - a.z) * t,
-        a.w + (b.w - a.w) * t
-    };
-}
-
-Vec3 Lerp(const Vec3& a, const Vec3& b, double t) {
-    return Vec3{
-        a.x + (b.x - a.x) * t,
-        a.y + (b.y - a.y) * t,
-        a.z + (b.z - a.z) * t
-    };
-}
-
-Vec2 Lerp(const Vec2& a, const Vec2& b, double t) {
-    return Vec2{
-        a.x + (b.x - a.x) * t,
-        a.y + (b.y - a.y) * t
-    };
-}
 
 /**
  * @brief 判断顶点相对于裁剪平面的位置值
@@ -34,10 +11,10 @@ Vec2 Lerp(const Vec2& a, const Vec2& b, double t) {
  */
 double PlaneValue(const ClipVertex& v, int plane) {
     switch (plane) {
-    case 0: return v.clip.x + v.clip.w; // x >= -w
-    case 1: return v.clip.w - v.clip.x; // x <= w
-    case 2: return v.clip.y + v.clip.w; // y >= -w
-    case 3: return v.clip.w - v.clip.y; // y <= w
+    case 0: return v.clip.x + v.clip.w; // x >= -w（左平面）
+    case 1: return v.clip.w - v.clip.x; // x <= w（右平面）
+    case 2: return v.clip.y + v.clip.w; // y >= -w（下平面）
+    case 3: return v.clip.w - v.clip.y; // y <= w（上平面）
     case 4: return v.clip.z;            // z >= 0 (近平面)
     case 5: return v.clip.w - v.clip.z; // z <= w (远平面)
     default: return 1.0;

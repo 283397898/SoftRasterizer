@@ -1,16 +1,19 @@
 #pragma once
 
+#include <vector>
 #include <string>
 #include <memory>
 
 namespace SR {
 
-// Forward declarations
+// 前向声明
 class Framebuffer;
 class DepthBuffer;
 class RenderQueue;
 struct FrameContext;
 struct RenderStats;
+struct Triangle;
+class MaterialTable;
 
 /**
  * @brief 渲染上下文，包含 Pass 执行所需的所有数据
@@ -20,11 +23,10 @@ struct RenderContext {
     DepthBuffer* depthBuffer = nullptr;
     const RenderQueue* renderQueue = nullptr;
     const FrameContext* frameContext = nullptr;
+    std::vector<Triangle>* deferredBlendTriangles = nullptr;
+    MaterialTable* materialTable = nullptr;
 
-    // Pass-specific data (can be extended)
-    void* passData = nullptr;
-
-    // Debug info
+    /// 当前 Pass 名称（调试用）
     std::string passName;
 };
 

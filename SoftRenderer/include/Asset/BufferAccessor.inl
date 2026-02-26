@@ -36,13 +36,13 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
     size_t baseOffset = view.byteOffset + accessor.byteOffset;
 
     auto componentSize = [](int componentType) -> size_t {
-        switch (componentType) {
-            case 5120: return 1; // BYTE
-            case 5121: return 1; // UNSIGNED_BYTE
-            case 5122: return 2; // SHORT
-            case 5123: return 2; // UNSIGNED_SHORT
-            case 5125: return 4; // UNSIGNED_INT
-            case 5126: return 4; // FLOAT
+        switch (static_cast<GLTFComponentType>(componentType)) {
+            case GLTFComponentType::Byte:          return 1;
+            case GLTFComponentType::UnsignedByte:  return 1;
+            case GLTFComponentType::Short:         return 2;
+            case GLTFComponentType::UnsignedShort: return 2;
+            case GLTFComponentType::UnsignedInt:   return 4;
+            case GLTFComponentType::Float:         return 4;
             default: return 0;
         }
     };
@@ -75,8 +75,8 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
     out.reserve(accessor.count);
 
     auto readComponent = [&](const uint8_t* ptr) -> double {
-        switch (accessor.componentType) {
-            case 5120: {
+        switch (static_cast<GLTFComponentType>(accessor.componentType)) {
+            case GLTFComponentType::Byte: {
                 int8_t v = 0;
                 std::memcpy(&v, ptr, sizeof(v));
                 if (accessor.normalized) {
@@ -87,7 +87,7 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
                 }
                 return static_cast<double>(v);
             }
-            case 5121: {
+            case GLTFComponentType::UnsignedByte: {
                 uint8_t v = 0;
                 std::memcpy(&v, ptr, sizeof(v));
                 if (accessor.normalized) {
@@ -96,7 +96,7 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
                 }
                 return static_cast<double>(v);
             }
-            case 5122: {
+            case GLTFComponentType::Short: {
                 int16_t v = 0;
                 std::memcpy(&v, ptr, sizeof(v));
                 if (accessor.normalized) {
@@ -105,7 +105,7 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
                 }
                 return static_cast<double>(v);
             }
-            case 5123: {
+            case GLTFComponentType::UnsignedShort: {
                 uint16_t v = 0;
                 std::memcpy(&v, ptr, sizeof(v));
                 if (accessor.normalized) {
@@ -114,7 +114,7 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
                 }
                 return static_cast<double>(v);
             }
-            case 5125: {
+            case GLTFComponentType::UnsignedInt: {
                 uint32_t v = 0;
                 std::memcpy(&v, ptr, sizeof(v));
                 if (accessor.normalized) {
@@ -123,7 +123,7 @@ std::vector<T> BufferAccessor::Read(const GLTFAsset& asset, const GLTFAccessor& 
                 }
                 return static_cast<double>(v);
             }
-            case 5126: {
+            case GLTFComponentType::Float: {
                 float v = 0.0f;
                 std::memcpy(&v, ptr, sizeof(v));
                 return static_cast<double>(v);
