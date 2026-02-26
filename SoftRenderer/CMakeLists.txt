@@ -22,6 +22,9 @@ add_library(SoftRenderer SHARED
     src/Pipeline/Rasterizer.cpp
     src/Pipeline/FragmentShader.cpp
     src/Pipeline/EnvironmentMap.cpp
+    src/Pipeline/MaterialTable.cpp
+    src/Pipeline/OpaquePass.cpp
+    src/Pipeline/PassBuilder.cpp
     src/Runtime/GPUScene.cpp
     src/Runtime/GPUSceneBuilder.cpp
     src/Scene/Scene.cpp
@@ -33,7 +36,6 @@ add_library(SoftRenderer SHARED
     src/Scene/Model.cpp
     src/Scene/RenderQueue.cpp
     src/Camera/OrbitCamera.cpp
-    src/Material/PBRMaterial.cpp
 )
 
 target_include_directories(SoftRenderer PUBLIC

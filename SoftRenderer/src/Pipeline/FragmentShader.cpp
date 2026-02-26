@@ -226,176 +226,6 @@ bool UseLinearFilter(const GLTFSampler* sampler) {
     return false;
 }
 
-SampledColor SampleBaseColor(const FragmentInput& input) {
-    SampledColor result{};
-    if (!input.images || input.baseColorImageIndex < 0 || input.baseColorImageIndex >= static_cast<int>(input.images->size())) {
-        return result;
-    }
-
-    const GLTFImage& image = (*input.images)[input.baseColorImageIndex];
-    const GLTFSampler* sampler = nullptr;
-    if (input.samplers && input.baseColorSamplerIndex >= 0 && input.baseColorSamplerIndex < static_cast<int>(input.samplers->size())) {
-        sampler = &(*input.samplers)[input.baseColorSamplerIndex];
-    }
-    if (UseLinearFilter(sampler)) {
-        return SampleImageBilinear(image, sampler, input.texCoord);
-    }
-    return SampleImageNearest(image, sampler, input.texCoord);
-}
-
-SampledColor SampleGeneric(const FragmentInput& input, int imageIndex, int samplerIndex, bool srgb) {
-    if (!input.images || imageIndex < 0 || imageIndex >= static_cast<int>(input.images->size())) {
-        return {};
-    }
-    const GLTFImage& image = (*input.images)[imageIndex];
-    const GLTFSampler* sampler = nullptr;
-    if (input.samplers && samplerIndex >= 0 && samplerIndex < static_cast<int>(input.samplers->size())) {
-        sampler = &(*input.samplers)[samplerIndex];
-    }
-    
-    // Create a temporary wrapper to handle sRGB override without copying the pixel data
-    int wrapS = sampler ? sampler->wrapS : 10497;
-    int wrapT = sampler ? sampler->wrapT : 10497;
-    double u = WrapCoord(input.texCoord.x, wrapS);
-    double v = WrapCoord(input.texCoord.y, wrapT);
-    
-    bool useLinear = UseLinearFilter(sampler);
-    bool useSRGB = srgb || image.isSRGB;
-    
-    if (useLinear) {
-        double fx = u * (image.width - 1);
-        double fy = v * (image.height - 1);
-        int x0 = static_cast<int>(fx);
-        int y0 = static_cast<int>(fy);
-        int x1 = std::min(x0 + 1, image.width - 1);
-        int y1 = std::min(y0 + 1, image.height - 1);
-        double tx = fx - x0;
-        double ty = fy - y0;
-
-        auto sample = [&](int x, int y) -> SampledColor {
-            size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-            if (index + 3 >= image.pixels.size()) return {};
-            const uint8_t* p = image.pixels.data() + index;
-            double r, g, b;
-            if (useSRGB) {
-                r = SRGBToLinearFast(p[0]);
-                g = SRGBToLinearFast(p[1]);
-                b = SRGBToLinearFast(p[2]);
-            } else {
-                r = p[0] / 255.0;
-                g = p[1] / 255.0;
-                b = p[2] / 255.0;
-            }
-            return {Vec3{r, g, b}, p[3] / 255.0};
-        };
-        SampledColor c00 = sample(x0, y0);
-        SampledColor c10 = sample(x1, y0);
-        SampledColor c01 = sample(x0, y1);
-        SampledColor c11 = sample(x1, y1);
-        Vec3 c0 = c00.rgb * (1.0 - tx) + c10.rgb * tx;
-        Vec3 c1 = c01.rgb * (1.0 - tx) + c11.rgb * tx;
-        Vec3 rgb = c0 * (1.0 - ty) + c1 * ty;
-        double a0 = c00.a * (1.0 - tx) + c10.a * tx;
-        double a1 = c01.a * (1.0 - tx) + c11.a * tx;
-        return {rgb, a0 * (1.0 - ty) + a1 * ty};
-    } else {
-        int x = static_cast<int>(u * image.width);
-        int y = static_cast<int>(v * image.height);
-        x = std::max(0, std::min(x, image.width - 1));
-        y = std::max(0, std::min(y, image.height - 1));
-        size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-        if (index + 3 >= image.pixels.size()) return {};
-        const uint8_t* p = image.pixels.data() + index;
-        double r, g, b;
-        if (useSRGB) {
-            r = SRGBToLinearFast(p[0]);
-            g = SRGBToLinearFast(p[1]);
-            b = SRGBToLinearFast(p[2]);
-        } else {
-            r = p[0] / 255.0;
-            g = p[1] / 255.0;
-            b = p[2] / 255.0;
-        }
-        return {Vec3{r, g, b}, p[3] / 255.0};
-    }
-}
-
-SampledColor SampleGenericAtUV(const FragmentInput& input, int imageIndex, int samplerIndex, const Vec2& uv, bool srgb) {
-    if (!input.images || imageIndex < 0 || imageIndex >= static_cast<int>(input.images->size())) {
-        return {};
-    }
-    const GLTFImage& image = (*input.images)[imageIndex];
-    const GLTFSampler* sampler = nullptr;
-    if (input.samplers && samplerIndex >= 0 && samplerIndex < static_cast<int>(input.samplers->size())) {
-        sampler = &(*input.samplers)[samplerIndex];
-    }
-
-    int wrapS = sampler ? sampler->wrapS : 10497;
-    int wrapT = sampler ? sampler->wrapT : 10497;
-    double u = WrapCoord(uv.x, wrapS);
-    double v = WrapCoord(uv.y, wrapT);
-
-    bool useLinear = UseLinearFilter(sampler);
-    bool useSRGB = srgb || image.isSRGB;
-
-    if (useLinear) {
-        double fx = u * (image.width - 1);
-        double fy = v * (image.height - 1);
-        int x0 = static_cast<int>(fx);
-        int y0 = static_cast<int>(fy);
-        int x1 = std::min(x0 + 1, image.width - 1);
-        int y1 = std::min(y0 + 1, image.height - 1);
-        double tx = fx - x0;
-        double ty = fy - y0;
-
-        auto sample = [&](int x, int y) -> SampledColor {
-            size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-            if (index + 3 >= image.pixels.size()) return {};
-            const uint8_t* p = image.pixels.data() + index;
-            double r, g, b;
-            if (useSRGB) {
-                r = SRGBToLinearFast(p[0]);
-                g = SRGBToLinearFast(p[1]);
-                b = SRGBToLinearFast(p[2]);
-            } else {
-                r = p[0] / 255.0;
-                g = p[1] / 255.0;
-                b = p[2] / 255.0;
-            }
-            return {Vec3{r, g, b}, p[3] / 255.0};
-        };
-        SampledColor c00 = sample(x0, y0);
-        SampledColor c10 = sample(x1, y0);
-        SampledColor c01 = sample(x0, y1);
-        SampledColor c11 = sample(x1, y1);
-        Vec3 c0 = c00.rgb * (1.0 - tx) + c10.rgb * tx;
-        Vec3 c1 = c01.rgb * (1.0 - tx) + c11.rgb * tx;
-        Vec3 rgb = c0 * (1.0 - ty) + c1 * ty;
-        double a0 = c00.a * (1.0 - tx) + c10.a * tx;
-        double a1 = c01.a * (1.0 - tx) + c11.a * tx;
-        return {rgb, a0 * (1.0 - ty) + a1 * ty};
-    } else {
-        int x = static_cast<int>(u * image.width);
-        int y = static_cast<int>(v * image.height);
-        x = std::max(0, std::min(x, image.width - 1));
-        y = std::max(0, std::min(y, image.height - 1));
-        size_t index = (static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x)) * 4;
-        if (index + 3 >= image.pixels.size()) return {};
-        const uint8_t* p = image.pixels.data() + index;
-        double r, g, b;
-        if (useSRGB) {
-            r = SRGBToLinearFast(p[0]);
-            g = SRGBToLinearFast(p[1]);
-            b = SRGBToLinearFast(p[2]);
-        } else {
-            r = p[0] / 255.0;
-            g = p[1] / 255.0;
-            b = p[2] / 255.0;
-        }
-        return {Vec3{r, g, b}, p[3] / 255.0};
-    }
-}
-
 Vec3 TintFromIndex(int index) {
     if (index < 0) {
         return Vec3{1.0, 1.0, 1.0};
@@ -470,155 +300,6 @@ inline Vec3 MultiscatterCompensation(const Vec3& F0, const Vec2& dfg) {
 
 } // namespace
 
-Vec3 FragmentShader::Shade(const FragmentInput& input) const {
-    Vec3 N = input.normal.Normalized();
-    Vec3 V = (input.cameraPos - input.worldPos).Normalized();
-
-    // Double-sided: flip normal to face the viewer (glTF spec requirement)
-    if (input.material.doubleSided && Vec3::Dot(N, V) < 0.0) {
-        N = N * -1.0;
-    }
-
-    double roughness = std::max(0.04, input.material.roughness);
-    double metallic = Saturate(input.material.metallic);
-    Vec3 albedo = Clamp01(input.material.albedo);
-    double alpha = input.material.alpha;
-
-    SampledColor baseColor{};
-    if (input.baseColorImageIndex >= 0) {
-        Vec2 baseUv = (input.baseColorTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-        baseColor = SampleGenericAtUV(input, input.baseColorImageIndex, input.baseColorSamplerIndex, baseUv, true);
-    }
-    Vec3 vertexColor = Clamp01(Vec3{input.color.x, input.color.y, input.color.z});
-    albedo = Mul(Mul(albedo, baseColor.rgb), vertexColor);
-    alpha *= baseColor.a * Clamp01(input.color.w);
-    if (input.material.transmissionFactor > 0.0 || input.transmissionImageIndex >= 0) {
-        double t = Saturate(input.material.transmissionFactor);
-        if (input.transmissionImageIndex >= 0) {
-            Vec2 tUv = (input.transmissionTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-            SampledColor transmission = SampleGenericAtUV(input, input.transmissionImageIndex, input.transmissionSamplerIndex, tUv, false);
-            t *= transmission.rgb.x;
-        }
-        alpha *= (1.0 - Saturate(t));
-    }
-    if (input.metallicRoughnessImageIndex >= 0) {
-        Vec2 mrUv = (input.metallicRoughnessTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-        SampledColor mr = SampleGenericAtUV(input, input.metallicRoughnessImageIndex, input.metallicRoughnessSamplerIndex, mrUv, false);
-        metallic = Saturate(metallic * mr.rgb.z);
-        roughness = std::max(0.04, mr.rgb.y * roughness);
-    }
-
-    if (input.normalImageIndex >= 0) {
-        Vec3 T = input.tangent.Normalized();
-        if (T.x != 0.0 || T.y != 0.0 || T.z != 0.0) {
-            Vec2 nUv = (input.normalTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-            SampledColor nm = SampleGenericAtUV(input, input.normalImageIndex, input.normalSamplerIndex, nUv, false);
-            Vec3 tangentNormal{nm.rgb.x * 2.0 - 1.0, nm.rgb.y * 2.0 - 1.0, nm.rgb.z * 2.0 - 1.0};
-            Vec3 B = Vec3::Cross(N, T).Normalized() * input.tangentW;
-            Vec3 worldNormal{
-                T.x * tangentNormal.x + B.x * tangentNormal.y + N.x * tangentNormal.z,
-                T.y * tangentNormal.x + B.y * tangentNormal.y + N.y * tangentNormal.z,
-                T.z * tangentNormal.x + B.z * tangentNormal.y + N.z * tangentNormal.z
-            };
-            N = worldNormal.Normalized();
-        }
-    }
-
-    if (kDebugTextureIndexTint && input.baseColorImageIndex >= 0) {
-        albedo = Mul(albedo, TintFromIndex(input.baseColorImageIndex));
-    }
-
-    // Compute dielectric F0 from IOR: F0 = ((ior-1)/(ior+1))^2
-    double iorF0 = (input.material.ior - 1.0) / (input.material.ior + 1.0);
-    iorF0 = iorF0 * iorF0;
-    // Apply KHR_materials_specular
-    Vec3 dielectricF0{
-        iorF0 * input.material.specularFactor * input.material.specularColorFactor.x,
-        iorF0 * input.material.specularFactor * input.material.specularColorFactor.y,
-        iorF0 * input.material.specularFactor * input.material.specularColorFactor.z
-    };
-    Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
-
-    // For BLEND mode: premultiply diffuse/ambient by alpha so specular
-    // reflections stay at full Fresnel strength (glass looks reflective).
-    // The rasterizer uses premultiplied blend: result = shaded + bg*(1-alpha)
-    double premulAlpha = (input.material.alphaMode == 2) ? Saturate(alpha) : 1.0;
-
-    double ndotv = std::max(0.0, Vec3::Dot(N, V));
-
-    // Multi-scatter GGX energy compensation (Kulla-Conty)
-    Vec2 dfg = ApproxDFG(ndotv, roughness);
-    Vec3 Fms = MultiscatterCompensation(F0, dfg);
-
-    Vec3 Lo{0.0, 0.0, 0.0};
-
-    // Accumulate lighting from all directional lights
-    if (input.lights) {
-        for (const DirectionalLight& light : *input.lights) {
-            Vec3 L = Vec3{-light.direction.x, -light.direction.y, -light.direction.z}.Normalized();
-            Vec3 H = (L + V).Normalized();
-
-            double ndotl = std::max(0.0, Vec3::Dot(N, L));
-            double ndoth = std::max(0.0, Vec3::Dot(N, H));
-            double vdoth = std::max(0.0, Vec3::Dot(V, H));
-
-            Vec3 F = FresnelSchlick(vdoth, F0);
-            double D = DistributionGGX(ndoth, roughness);
-            double G = GeometrySmith(ndotv, ndotl, roughness);
-
-            Vec3 numerator = Mul(F, D * G);
-            double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
-
-            Vec3 kS = F;
-            Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
-            Vec3 diffuse = Mul(kD, Div(albedo, kPi));
-            if (premulAlpha < 1.0) {
-                diffuse = Mul(diffuse, premulAlpha);
-            }
-
-            Vec3 radiance = Mul(light.color, light.intensity);
-            Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
-            contrib = Mul(contrib, radiance);
-
-            Lo = Add(Lo, contrib);
-        }
-    }
-
-    // === Ambient: split into diffuse + specular (IBL approximation) ===
-    Vec3 kS_env = FresnelSchlick(ndotv, F0);
-    Vec3 kD_env = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS_env), 1.0 - metallic);
-
-    Vec3 ambientDiffuse = Mul(input.ambientColor, Mul(kD_env, albedo));
-    if (premulAlpha < 1.0) {
-        ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
-    }
-
-    double envSmooth = 1.0 - roughness * roughness;
-    Vec3 ambientSpecular = Mul(Mul(kS_env, Fms), input.ambientColor * envSmooth); // 多重散射补偿
-
-    Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
-
-    if (input.occlusionImageIndex >= 0) {
-        Vec2 occUv = (input.occlusionTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-        SampledColor occ = SampleGenericAtUV(input, input.occlusionImageIndex, input.occlusionSamplerIndex, occUv, false);
-        ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
-        ambient = Add(ambientDiffuse, ambientSpecular);
-    }
-
-    Vec3 color = Add(ambient, Lo);
-    // Emissive: texture * emissiveFactor, or just emissiveFactor if no texture
-    Vec3 emissiveContrib = input.material.emissiveFactor;
-    if (input.emissiveImageIndex >= 0) {
-        Vec2 emUv = (input.emissiveTexCoordSet == 1) ? input.texCoord1 : input.texCoord;
-        SampledColor emissive = SampleGenericAtUV(input, input.emissiveImageIndex, input.emissiveSamplerIndex, emUv, true);
-        emissiveContrib = Mul(emissive.rgb, input.material.emissiveFactor);
-    }
-    color = Add(color, emissiveContrib);
-
-    return color;
-}
-
 // ============================================================================
 // Optimized ShadeFast - separates per-triangle context from per-pixel varying
 // ============================================================================
@@ -627,9 +308,9 @@ namespace {
 
 // Fast texture sampling without FragmentInput wrapper
 // Optimized texture sampling with precomputed constants and reduced branching
-SampledColor SampleImageFast(const std::vector<GLTFImage>* images, 
+SampledColor SampleImageFast(const std::vector<GLTFImage>* images,
                              const std::vector<GLTFSampler>* samplers,
-                             int imageIndex, int samplerIndex, 
+                             int imageIndex, int samplerIndex,
                              const Vec2& texCoord, bool srgb) {
     if (!images || imageIndex < 0 || imageIndex >= static_cast<int>(images->size())) {
         return {};
@@ -740,10 +421,10 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         double invNLen = 1.0 / std::sqrt(nLenSq);
         N.x *= invNLen; N.y *= invNLen; N.z *= invNLen;
     }
-    
+
     // Inline normalize for V (avoid function call overhead)
-    Vec3 V{ctx.cameraPos.x - varying.worldPos.x, 
-           ctx.cameraPos.y - varying.worldPos.y, 
+    Vec3 V{ctx.cameraPos.x - varying.worldPos.x,
+           ctx.cameraPos.y - varying.worldPos.y,
            ctx.cameraPos.z - varying.worldPos.z};
     double vLenSq = V.x * V.x + V.y * V.y + V.z * V.z;
     if (vLenSq > 1e-12) {
@@ -752,22 +433,22 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
     }
 
     // Double-sided: flip normal to face the viewer (glTF spec requirement)
-    if (ctx.material->doubleSided) {
+    if (ctx.doubleSided) {
         double ndotv_raw = N.x * V.x + N.y * V.y + N.z * V.z;
         if (ndotv_raw < 0.0) {
             N.x = -N.x; N.y = -N.y; N.z = -N.z;
         }
     }
 
-    double roughness = std::max(0.04, ctx.material->roughness);
-    double metallic = Saturate(ctx.material->metallic);
-    Vec3 albedo = Clamp01(ctx.material->albedo);
+    double roughness = std::max(0.04, ctx.roughness);
+    double metallic = Saturate(ctx.metallic);
+    Vec3 albedo = Clamp01(ctx.albedo);
 
     // Sample base color texture
-    double alpha = ctx.material->alpha;
+    double alpha = ctx.alpha;
     if (ctx.baseColorImageIndex >= 0) {
         Vec2 baseUv = (ctx.baseColorTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
-        SampledColor baseColor = SampleImageFast(ctx.images, ctx.samplers, 
+        SampledColor baseColor = SampleImageFast(ctx.images, ctx.samplers,
             ctx.baseColorImageIndex, ctx.baseColorSamplerIndex, baseUv, true);
         Vec3 vertexColor = Clamp01(Vec3{varying.color.x, varying.color.y, varying.color.z});
         albedo = Mul(Mul(albedo, baseColor.rgb), vertexColor);
@@ -778,8 +459,8 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         albedo = Mul(albedo, vertexColor);
         alpha *= Clamp01(varying.color.w);
     }
-    if (ctx.material->transmissionFactor > 0.0 || ctx.transmissionImageIndex >= 0) {
-        double t = Saturate(ctx.material->transmissionFactor);
+    if (ctx.transmissionFactor > 0.0 || ctx.transmissionImageIndex >= 0) {
+        double t = Saturate(ctx.transmissionFactor);
         if (ctx.transmissionImageIndex >= 0) {
             Vec2 tUv = (ctx.transmissionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
             SampledColor transmission = SampleImageFast(ctx.images, ctx.samplers,
@@ -788,7 +469,7 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
         alpha *= (1.0 - Saturate(t));
     }
-    
+
     // Sample metallic-roughness texture
     if (ctx.metallicRoughnessImageIndex >= 0) {
         Vec2 mrUv = (ctx.metallicRoughnessTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
@@ -806,12 +487,12 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         if (tLenSq > 1e-12) {
             double invTLen = 1.0 / std::sqrt(tLenSq);
             T.x *= invTLen; T.y *= invTLen; T.z *= invTLen;
-            
+
             Vec2 nUv = (ctx.normalTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
             SampledColor nm = SampleImageFast(ctx.images, ctx.samplers,
                 ctx.normalImageIndex, ctx.normalSamplerIndex, nUv, false);
             Vec3 tangentNormal{nm.rgb.x * 2.0 - 1.0, nm.rgb.y * 2.0 - 1.0, nm.rgb.z * 2.0 - 1.0};
-            
+
             // Inline Cross and normalize for B, then multiply by tangentW for handedness
             Vec3 B{N.y * T.z - N.z * T.y, N.z * T.x - N.x * T.z, N.x * T.y - N.y * T.x};
             double bLenSq = B.x * B.x + B.y * B.y + B.z * B.z;
@@ -819,13 +500,13 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
                 double invBLen = ctx.tangentW / std::sqrt(bLenSq);
                 B.x *= invBLen; B.y *= invBLen; B.z *= invBLen;
             }
-            
+
             Vec3 worldNormal{
                 T.x * tangentNormal.x + B.x * tangentNormal.y + N.x * tangentNormal.z,
                 T.y * tangentNormal.x + B.y * tangentNormal.y + N.y * tangentNormal.z,
                 T.z * tangentNormal.x + B.z * tangentNormal.y + N.z * tangentNormal.z
             };
-            
+
             // Inline normalize for worldNormal
             double wnLenSq = worldNormal.x * worldNormal.x + worldNormal.y * worldNormal.y + worldNormal.z * worldNormal.z;
             if (wnLenSq > 1e-12) {
@@ -838,20 +519,20 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
     }
 
     // Compute dielectric F0 from IOR: F0 = ((ior-1)/(ior+1))^2
-    double iorF0 = (ctx.material->ior - 1.0) / (ctx.material->ior + 1.0);
+    double iorF0 = (ctx.ior - 1.0) / (ctx.ior + 1.0);
     iorF0 = iorF0 * iorF0;
     // Apply KHR_materials_specular
     Vec3 dielectricF0{
-        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.x,
-        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.y,
-        iorF0 * ctx.material->specularFactor * ctx.material->specularColorFactor.z
+        iorF0 * ctx.specularFactor * ctx.specularColorFactor.x,
+        iorF0 * ctx.specularFactor * ctx.specularColorFactor.y,
+        iorF0 * ctx.specularFactor * ctx.specularColorFactor.z
     };
     Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
 
     // For BLEND mode: premultiply diffuse/ambient by alpha so specular
     // reflections stay at full Fresnel strength (glass looks reflective).
     // The rasterizer uses premultiplied blend: result = shaded + bg*(1-alpha)
-    double premulAlpha = (ctx.material->alphaMode == 2) ? Saturate(alpha) : 1.0;
+    double premulAlpha = (ctx.alphaMode == 2) ? Saturate(alpha) : 1.0;
 
     double ndotv = std::max(0.0, Vec3::Dot(N, V));
 
@@ -866,12 +547,12 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         for (size_t i = 0; i < ctx.precomputedLightCount; ++i) {
             const PrecomputedLight& pl = ctx.precomputedLights[i];
             const Vec3& L = pl.L;
-            
+
             double ndotl = Vec3::Dot(N, L);
-            
+
             // Early exit if light is on back side
             if (ndotl <= 0.0) continue;
-            
+
             // Compute H = normalize(L + V) - inline to avoid function call
             Vec3 H{L.x + V.x, L.y + V.y, L.z + V.z};
             double hLenSq = H.x * H.x + H.y * H.y + H.z * H.z;
@@ -989,12 +670,12 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
     Vec3 color = Add(ambient, Lo);
 
     // Emissive: texture * emissiveFactor, or just emissiveFactor if no texture
-    Vec3 emissiveContrib = ctx.material->emissiveFactor;
+    Vec3 emissiveContrib = ctx.emissiveFactor;
     if (ctx.emissiveImageIndex >= 0) {
         Vec2 emUv = (ctx.emissiveTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor emissive = SampleImageFast(ctx.images, ctx.samplers,
             ctx.emissiveImageIndex, ctx.emissiveSamplerIndex, emUv, true);
-        emissiveContrib = Mul(emissive.rgb, ctx.material->emissiveFactor);
+        emissiveContrib = Mul(emissive.rgb, ctx.emissiveFactor);
     }
     color = Add(color, emissiveContrib);
 

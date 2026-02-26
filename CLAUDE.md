@@ -10,7 +10,8 @@ SoftRasterizer/
 │   ├── include/
 │   │   ├── Math/          # Vec3, Vec4, Mat4 (double precision)
 │   │   ├── Renderer/      # Core rendering classes
-│   │   ├── Pipeline/      # Geometry, Clipper, Rasterizer, Fragment, PostProcess
+│   │   ├── Pipeline/      # Geometry, Clipper, Rasterizer, Fragment, PostProcess, Passes
+│   │   ├── Runtime/       # GPUScene, ResourcePool, TexturePool, MeshPool
 │   │   └── Scene/         # Scene management
 │   └── src/
 ├── MFCDemo/               # Windows desktop app (uses D3D12 for display only)
@@ -61,6 +62,73 @@ SoftRasterizer/
 ## Data Flow
 
 `Scene` → `GPUScene` (Flattened/Optimized) → `RenderQueue` → `Rasterizer` → `Framebuffer`
+
+## Core Architecture Components
+
+### MaterialTable (SOA Storage)
+Location: `SoftRenderer/include/Pipeline/MaterialTable.h`
+
+Cache-friendly Structure of Arrays (SOA) storage for material properties:
+- Uses `MaterialHandle` (uint32_t) instead of storing full material data per triangle
+- Reduces Triangle struct size from ~45 fields to ~15 fields
+- Supports handle reuse via free list for efficient memory management
+
+```cpp
+MaterialTable table;
+MaterialParams params;
+params.baseColorTextureIndex = texIdx;
+MaterialHandle handle = table.AddMaterial(params);
+```
+
+### ResourcePool<T> (Generic Resource Management)
+Location: `SoftRenderer/include/Runtime/ResourcePool.h`
+
+Template-based resource pool with:
+- Generational handles (index + generation) for safe access
+- LRU eviction support with memory budgeting
+- Specializations: `TexturePool`, `MeshPool`, `MaterialPool`
+
+```cpp
+ResourcePool<Texture> texturePool;
+texturePool.SetMemoryBudget(256 * 1024 * 1024); // 256MB
+TexturePool::Handle tex = texturePool.Allocate(1024, 1024, Format::RGBA8);
+Texture* ptr = texturePool.Get(tex);
+```
+
+### PassBuilder (Configurable Pipeline)
+Location: `SoftRenderer/include/Pipeline/PassBuilder.h`
+
+Builder pattern for configuring render passes with dependency resolution:
+- Topological sort ensures correct execution order
+- Circular dependency detection
+- Conditional pass execution support
+
+```cpp
+PassBuilder builder;
+builder.AddPass(std::make_unique<OpaquePass>())
+       .AddPass(std::make_unique<SkyboxPass>())
+       .AddPass(std::make_unique<TransparentPass>())
+       .AddPass(std::make_unique<PostProcessPass>());
+builder.AddDependency("TransparentPass", "OpaquePass");
+auto passes = builder.Build();
+
+// Or use default pipeline
+auto passes = DefaultPipeline::Create();
+```
+
+### RenderPass System
+Location: `SoftRenderer/include/Pipeline/RenderPass.h`, `OpaquePass.h`
+
+Abstract base class for render passes:
+- `OpaquePass`: Renders opaque geometry with Early-Z
+- `TransparentPass`: Back-to-front sorted alpha blending
+- `SkyboxPass`: Environment map background
+- `PostProcessPass`: FXAA + tone mapping
+
+Each pass implements:
+- `Execute(RenderContext&)`: Main render logic
+- `ShouldExecute(const RenderContext&)`: Conditional execution
+- `GetName()`: Debug identification
 
 ## Dependencies
 

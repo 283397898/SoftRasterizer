@@ -1,78 +1,61 @@
 #pragma once
 
 #include <vector>
+#include <cstdint>
 
 #include "Core/Framebuffer.h"
 #include "Core/DepthBuffer.h"
-#include "Material/PBRMaterial.h"
 #include "Math/Vec2.h"
 #include "Math/Vec3.h"
 #include "Math/Vec4.h"
 #include "Pipeline/FrameContext.h"
+#include "Pipeline/MaterialTable.h"
 
 namespace SR {
 
 /**
  * @brief 表示待光栅化的三角形及其属性
+ *
+ * 优化后的结构使用 MaterialHandle 引用 MaterialTable 中的材质数据，
+ * 大幅减少单个 Triangle 的内存占用。
  */
 struct Triangle {
+    // 顶点位置 (裁剪空间)
     Vec4 v0{};
     Vec4 v1{};
     Vec4 v2{};
 
+    // 纹理坐标 (主UV集和次UV集)
     Vec2 t0{};
     Vec2 t1{};
     Vec2 t2{};
     Vec2 t0_1{};
     Vec2 t1_1{};
     Vec2 t2_1{};
+
+    // 顶点颜色
     Vec4 c0{};
     Vec4 c1{};
     Vec4 c2{};
 
+    // 切线数据
     Vec3 tg0{};
     Vec3 tg1{};
     Vec3 tg2{};
     double tangentW = 1.0; ///< 切线 W 分量 (+1/-1)，决定副切线方向
 
+    // 世界空间位置
     Vec3 w0{};
     Vec3 w1{};
     Vec3 w2{};
 
+    // 法线
     Vec3 n0{};
     Vec3 n1{};
     Vec3 n2{};
 
-    PBRMaterial material{};
-
-    int meshIndex = -1;
-    int materialIndex = -1;
-    int primitiveIndex = -1;
-    int nodeIndex = -1;
-    int baseColorTextureIndex = -1;
-    int metallicRoughnessTextureIndex = -1;
-    int normalTextureIndex = -1;
-    int occlusionTextureIndex = -1;
-    int emissiveTextureIndex = -1;
-    int transmissionTextureIndex = -1;
-    int baseColorImageIndex = -1;
-    int metallicRoughnessImageIndex = -1;
-    int normalImageIndex = -1;
-    int occlusionImageIndex = -1;
-    int emissiveImageIndex = -1;
-    int transmissionImageIndex = -1;
-    int baseColorSamplerIndex = -1;
-    int metallicRoughnessSamplerIndex = -1;
-    int normalSamplerIndex = -1;
-    int occlusionSamplerIndex = -1;
-    int emissiveSamplerIndex = -1;
-    int transmissionSamplerIndex = -1;
-    int baseColorTexCoordSet = 0;
-    int metallicRoughnessTexCoordSet = 0;
-    int normalTexCoordSet = 0;
-    int occlusionTexCoordSet = 0;
-    int emissiveTexCoordSet = 0;
-    int transmissionTexCoordSet = 0;
+    // 材质句柄 (引用 MaterialTable)
+    MaterialHandle materialId = 0;
 };
 
 /**

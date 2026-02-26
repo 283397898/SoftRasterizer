@@ -38,6 +38,9 @@ void GPUScene::Clear() {
 	m_ownedMaterials.clear();
 	m_ownedImages.clear();
 	m_ownedSamplers.clear();
+	// Also clear pools
+	m_meshPool.Clear();
+	m_materialPool.Clear();
 }
 
 /** @brief 获取渲染项 */
@@ -598,6 +601,33 @@ void GPUScene::Build(const GLTFAsset& asset, int sceneIndex) {
 		totalMs, totalAccessorReadMs, totalNormalsMs, normalGenCount, totalTangentsMs, tangentGenCount, sceneGraphMs,
 		asset.meshes.size(), totalPrims, m_items.size(), asset.images.size());
 	OutputDebugStringA(buffer);
+}
+
+// ========== ResourcePool 集成 API ==========
+
+void GPUScene::SetMemoryBudget(size_t meshBytes, size_t materialBytes) {
+	m_meshPool.SetMemoryBudget(meshBytes);
+	m_materialPool.SetMemoryBudget(materialBytes);
+}
+
+void GPUScene::EvictResources() {
+	m_meshPool.EvictLRU();
+	m_materialPool.EvictLRU();
+}
+
+size_t GPUScene::GetTotalMemoryUsage() const {
+	size_t total = 0;
+	// Add up memory from traditional storage
+	for (const auto& mesh : m_ownedMeshes) {
+		total += mesh.GetVertices().size() * sizeof(Vertex);
+		total += mesh.GetIndices().size() * sizeof(uint32_t);
+	}
+	for (const auto& image : m_ownedImages) {
+		total += image.pixels.size();
+	}
+	// Add memory from pools
+	total += m_meshPool.GetTotalTriangleCount() * 3 * sizeof(uint32_t);
+	return total;
 }
 
 } // namespace SR

@@ -5,6 +5,7 @@
 #include "Material/PBRMaterial.h"
 #include "Pipeline/FrameContext.h"
 #include "Pipeline/Rasterizer.h"
+#include "Pipeline/MaterialTable.h"
 #include "Scene/Mesh.h"
 #include "Scene/Transform.h"
 #include "Scene/RenderQueue.h"
@@ -17,13 +18,14 @@ namespace SR {
 class GeometryProcessor {
 public:
     /**
-     * @brief 从网格和材质构建一组经过变换的三角形
+     * @brief 从网格和材质构建一组经过变换的三角形 (使用 MaterialTable)
      * @param mesh 输入网格数据
      * @param material 输入材质参数
      * @param item 渲染提交项
      * @param modelMatrix 模型到世界坐标变换矩阵
      * @param normalMatrix 法线变换矩阵
      * @param frameContext 系统级帧上下文 (包含 View/Projection)
+     * @param materialTable 材质表 (用于存储材质数据)
      * @param outTriangles 输出构建好的三角形列表
      */
     void BuildTriangles(const Mesh& mesh,
@@ -32,6 +34,7 @@ public:
                         const Mat4& modelMatrix,
                         const Mat4& normalMatrix,
                         const FrameContext& frameContext,
+                        MaterialTable& materialTable,
                         std::vector<Triangle>& outTriangles) const;
     /** @brief 获取最后一次构建生成的三角形总数 */
     uint64_t GetLastTriangleCount() const;

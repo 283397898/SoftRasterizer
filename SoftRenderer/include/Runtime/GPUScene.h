@@ -8,6 +8,8 @@
 #include "Material/PBRMaterial.h"
 #include "Math/Mat4.h"
 #include "Scene/Mesh.h"
+#include "Runtime/MeshPool.h"
+#include "Runtime/MaterialPool.h"
 
 namespace SR {
 
@@ -48,6 +50,22 @@ struct GPUSceneDrawItem {
 
 /**
  * @brief 扁平化的渲染场景，由 DrawItem 列表组成
+ *
+ * 支持两种模式：
+ * 1. 传统模式：使用 std::vector 存储资源
+ * 2. 池化模式：使用 ResourcePool 管理资源（未来默认）
+ *
+ * ## 材质管理架构
+ * GPUScene 同时持有两种材质存储方式：
+ *
+ * - **m_materials (vector<PBRMaterial>)**: 扁平化的材质数据
+ * - **m_materialPool (MaterialPool)**: 池化的材质对象管理 (AOS 布局)
+ *
+ * 渲染时，GeometryProcessor 从这些存储中提取属性，
+ * 添加到帧级别的 MaterialTable (SOA 布局) 供 FragmentShader 使用。
+ *
+ * @see MaterialPool 场景级别的 AOS 材质存储
+ * @see MaterialTable 帧级别的 SOA 材质存储 (渲染时使用)
  */
 class SR_API GPUScene {
 public:
@@ -68,12 +86,35 @@ public:
     /** @brief 获取场景相关的采样器列表 */
     const std::vector<GLTFSampler>& GetSamplers() const;
 
+    // ========== ResourcePool 集成 API (未来默认) ==========
+
+    /** @brief 获取网格池 */
+    MeshPool& GetMeshPool() { return m_meshPool; }
+    const MeshPool& GetMeshPool() const { return m_meshPool; }
+
+    /** @brief 获取材质池 */
+    MaterialPool& GetMaterialPool() { return m_materialPool; }
+    const MaterialPool& GetMaterialPool() const { return m_materialPool; }
+
+    /** @brief 设置资源内存预算 */
+    void SetMemoryBudget(size_t meshBytes, size_t materialBytes);
+
+    /** @brief 执行 LRU 淘汰 */
+    void EvictResources();
+
+    /** @brief 获取总资源内存使用量 */
+    size_t GetTotalMemoryUsage() const;
+
 private:
     std::vector<GPUSceneDrawItem> m_items;
     std::vector<Mesh> m_ownedMeshes;
     std::vector<PBRMaterial> m_ownedMaterials;
     std::vector<GLTFImage> m_ownedImages;
     std::vector<GLTFSampler> m_ownedSamplers;
+
+    // ResourcePool 成员（用于未来池化模式）
+    MeshPool m_meshPool;
+    MaterialPool m_materialPool;
 };
 
 } // namespace SR

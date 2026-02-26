@@ -3,6 +3,8 @@
 #include "Pipeline/GeometryProcessor.h"
 #include "Pipeline/Rasterizer.h"
 #include "Pipeline/EnvironmentMap.h"
+#include "Pipeline/MaterialTable.h"
+#include "Pipeline/OpaquePass.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +19,50 @@
 namespace SR {
 
 /**
+ * @brief 使用 Pass 系统执行渲染管线
+ * @param passes 按依赖关系排序的 Pass 列表
+ * @param context 渲染上下文
+ * @return 汇总的渲染统计信息
+ */
+RenderStats RenderPipeline::ExecutePasses(std::vector<std::unique_ptr<RenderPass>>& passes,
+                                          RenderContext& context) const {
+    RenderStats totalStats;
+
+    for (auto& pass : passes) {
+        if (!pass) continue;
+
+        // Check if pass should execute
+        if (!pass->ShouldExecute(context)) {
+            continue;
+        }
+
+        PassStats passStats = ExecutePass(*pass, context);
+
+        // Aggregate stats
+        totalStats.buildMs += passStats.buildMs;
+        totalStats.rastMs += passStats.rastMs;
+        totalStats.trianglesBuilt += passStats.trianglesBuilt;
+        totalStats.trianglesClipped += passStats.trianglesClipped;
+        totalStats.trianglesRaster += passStats.trianglesRendered;
+        totalStats.pixelsTested += passStats.pixelsTested;
+        totalStats.pixelsShaded += passStats.pixelsShaded;
+    }
+
+    return totalStats;
+}
+
+/**
+ * @brief 执行单个 Pass
+ */
+PassStats RenderPipeline::ExecutePass(RenderPass& pass, RenderContext& context) const {
+    char debugMsg[256];
+    snprintf(debugMsg, sizeof(debugMsg), "RenderPipeline: Executing pass '%s'\n", pass.GetName().c_str());
+    OutputDebugStringA(debugMsg);
+
+    return pass.Execute(context);
+}
+
+/**
  * @brief 执行每一帧的准备工作，目前主要用于清除帧缓冲和深度缓冲
  * @param pass 当前 Pass 上下文
  */
@@ -27,14 +73,26 @@ void RenderPipeline::Prepare(const PassContext& pass) const {
 }
 
 /**
- * @brief 执行绘制流程：遍历渲染队列，调用几何处理器和光栅化器
- * @param queue 渲染项目队列
- * @param pass 当前 Pass 上下文
- * @param outDeferredBlend 如果非空，透明三角形不在此处光栅化，而是输出到该容器中
- * @return 绘制过程中的统计数据 (耗时、三角形数等)
+ * @brief 内部绘制实现，使用外部提供的 MaterialTable
  */
 RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pass,
                                   std::vector<Triangle>* outDeferredBlend) const {
+    // Create MaterialTable for this frame - must live through entire render process
+    MaterialTable materialTable;
+    return DrawWithMaterialTable(queue, pass, materialTable, outDeferredBlend);
+}
+
+/**
+ * @brief 执行绘制流程：遍历渲染队列，调用几何处理器和光栅化器
+ * @param queue 渲染项目队列
+ * @param pass 当前 Pass 上下文
+ * @param materialTable 材质表 (必须在整个绘制期间保持有效)
+ * @param outDeferredBlend 如果非空，透明三角形不在此处光栅化，而是输出到该容器中
+ * @return 绘制过程中的统计数据 (耗时、三角形数等)
+ */
+RenderStats RenderPipeline::DrawWithMaterialTable(const RenderQueue& queue, const PassContext& pass,
+                                                   MaterialTable& materialTable,
+                                                   std::vector<Triangle>* outDeferredBlend) const {
     RenderStats stats{};
 
     if (!pass.framebuffer || !pass.depthBuffer) {
@@ -43,9 +101,13 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
 
     OutputDebugStringA("RenderPipeline Draw: begin\n");
 
+    // Create frame context with material table
+    FrameContext frameWithMaterials = pass.frame;
+    frameWithMaterials.materialTable = &materialTable;
+
     Rasterizer rasterizer;
     rasterizer.SetTargets(pass.framebuffer, pass.depthBuffer);
-    rasterizer.SetFrameContext(pass.frame);
+    rasterizer.SetFrameContext(frameWithMaterials);
 
     GeometryProcessor geometryProcessor;
     std::vector<Triangle> itemTriangles;
@@ -110,7 +172,8 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
                 item,
                 item.modelMatrix,
                 item.normalMatrix,
-                pass.frame,
+                frameWithMaterials,
+                materialTable,
                 localItemTriangles);
 
             perThreadBuilt[tid] += localGP.GetLastTriangleCount();
@@ -191,9 +254,16 @@ RenderStats RenderPipeline::Draw(const RenderQueue& queue, const PassContext& pa
 RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& pass) const {
     Prepare(pass);
 
+    // Create MaterialTable at Render level to ensure it lives through entire frame
+    MaterialTable materialTable;
+
+    // Create frame context with material table
+    FrameContext frameWithMaterials = pass.frame;
+    frameWithMaterials.materialTable = &materialTable;
+
     // Draw 内部：先光栅化不透明批次，返回待渲染的透明三角形
     std::vector<Triangle> deferredBlend;
-    RenderStats stats = Draw(queue, pass, &deferredBlend);
+    RenderStats stats = DrawWithMaterialTable(queue, pass, materialTable, &deferredBlend);
 
     // 天空盒填充未被不透明几何覆盖的像素
     RenderSkybox(pass);
@@ -202,7 +272,7 @@ RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& 
     if (!deferredBlend.empty()) {
         Rasterizer rasterizer;
         rasterizer.SetTargets(pass.framebuffer, pass.depthBuffer);
-        rasterizer.SetFrameContext(pass.frame);
+        rasterizer.SetFrameContext(frameWithMaterials);
 
         using Clock = std::chrono::high_resolution_clock;
         auto rastStart = Clock::now();

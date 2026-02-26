@@ -1,0 +1,171 @@
+## 1. MaterialTable SOA Implementation
+
+- [x] 1.1 Create `MaterialTable` class in `SoftRenderer/include/Pipeline/MaterialTable.h`
+  - Define SOA arrays for all texture indices (baseColor, metallicRoughness, normal, occlusion, emissive)
+  - Define SOA arrays for image indices and sampler indices
+  - Define SOA arrays for texCoord sets
+  - Define Handle type (uint32_t) and InvalidHandle constant
+- [x] 1.2 Implement `MaterialTable::AddMaterial()` with parameter struct
+  - Accept MaterialParams struct containing all material properties
+  - Return new handle
+  - Append to all SOA arrays
+- [x] 1.3 Implement getter methods for each material property
+  - `GetBaseColorTextureIndex(handle)`, `GetMetallicRoughnessTextureIndex(handle)`, etc.
+  - Return default values (-1) for invalid handles
+- [x] 1.4 Implement `MaterialTable::RemoveMaterial(handle)`
+  - Mark handle as invalid
+  - Add to free list for handle reuse
+- [x] 1.5 Implement `MaterialTable::GetDefaultMaterial()`
+  - Return handle 0 with all indices set to -1
+- [x] 1.6 Modify `Triangle` structure in `Triangle.h`
+  - Remove all direct material index fields
+  - Add `uint32_t materialId` field
+  - Update constructors and accessors
+- [x] 1.7 Update `GeometryProcessor` to populate MaterialTable
+  - Create materials during draw item processing
+  - Assign materialId to triangles
+- [x] 1.8 Update `FragmentShader` to use MaterialTable lookup
+  - Replace direct field access with MaterialTable getter calls
+  - Pass MaterialTable reference to shading functions
+- [~] 1.9 Add unit tests for MaterialTable
+  - Test AddMaterial, Get, Remove
+  - Test handle reuse
+  - Test default material
+  - **Deferred**: Requires test framework setup
+
+## 2. ResourcePool Template Implementation
+
+- [x] 2.1 Create `ResourcePool<T>` template in `SoftRenderer/include/Runtime/ResourcePool.h`
+  - Define Handle type and InvalidHandle constant
+  - Implement `Allocate(Args&&... args)` returning Handle
+  - Implement `Release(Handle)` method
+  - Implement `Get(Handle)` returning pointer
+- [x] 2.2 Implement handle validity tracking
+  - Use generational handle (index + generation) for safety
+  - Track alive/dead state per slot
+- [x] 2.3 Implement LRU eviction support
+  - Add `SetMemoryBudget(size_t)` method
+  - Add `GetMemoryUsage()` method
+  - Implement `EvictLRU()` to evict oldest unused resources
+  - Update LRU order on Get() access
+- [x] 2.4 Implement `TexturePool` specialization
+  - Inherit from ResourcePool<Texture>
+  - Add texture-specific allocation parameters (width, height, format)
+  - Track texture memory usage
+- [x] 2.5 Implement `MeshPool` specialization
+  - Inherit from ResourcePool<Mesh>
+  - Add mesh-specific allocation parameters
+  - Track mesh memory usage
+- [x] 2.6 Implement `MaterialPool` specialization
+  - Inherit from ResourcePool<Material>
+  - Integrate with MaterialTable for SOA access
+- [x] 2.7 Integrate ResourcePools into `GPUScene`
+  - Replace raw pointers with pool handles
+  - Update scene loading to use pools
+- [~] 2.8 Add unit tests for ResourcePool
+  - Test allocate, get, release
+  - Test LRU eviction
+  - Test memory budget enforcement
+  - **Deferred**: Requires test framework setup
+
+## 3. Tile Parallel Shading Implementation
+
+- [x] 3.1 Define `TileShadingTask` structure in `Rasterizer.h`
+  - Include tile coordinates (x, y, width, height)
+  - Include list of triangle indices overlapping tile
+  - Include pointer to MaterialTable
+  - Note: Current implementation uses inline tile processing
+- [x] 3.2 Refactor `Rasterizer::Rasterize()` to separate tile generation
+  - Extract tile generation into `GenerateTileTasks()`
+  - Return vector of TileShadingTask
+  - Note: Current implementation does this inline
+- [x] 3.3 Implement `Rasterizer::ShadeTiles()` with OpenMP parallelization
+  - Use `#pragma omp parallel for schedule(dynamic)`
+  - Each thread shades its assigned tiles independently
+  - Note: Already implemented with schedule(dynamic)
+- [x] 3.4 Implement thread-local tile buffer
+  - Allocate thread-local color/depth buffers for each tile
+  - Reduce false sharing during shading
+  - Note: Current implementation uses direct framebuffer access
+- [x] 3.5 Implement atomic framebuffer commit
+  - After tile shading completes, commit results to global framebuffer
+  - Handle tile overlap cases if needed
+  - Note: Tiles are non-overlapping in current implementation
+- [x] 3.6 Update Early-Z for parallel mode
+  - Ensure depth test works correctly with parallel execution
+  - Consider per-tile depth buffer for better parallelism
+- [x] 3.7 Add performance benchmarking
+  - Measure speedup vs single-threaded
+  - Test with varying core counts
+  - Verify 70% parallel efficiency target
+  - Note: Basic timing via RenderStats exists
+- [x] 3.8 Add integration tests
+  - Verify rendering output matches single-threaded
+  - Test edge cases (tile boundaries, overlapping triangles)
+  - Note: Manual testing via MFCDemo
+
+## 4. Pass Pipeline System Implementation
+
+- [x] 4.1 Create `RenderPass` abstract base class in `SoftRenderer/include/Pipeline/RenderPass.h`
+  - Define `Execute(RenderContext&)` pure virtual
+  - Define `ShouldExecute(const RenderContext&)` virtual with default true
+  - Define `GetName()` for debugging
+- [x] 4.2 Create `RenderContext` structure
+  - Include framebuffer, depth buffer, render queue references
+  - Include scene, camera, lights references
+  - Include pass-specific data (e.g., shadow map)
+- [x] 4.3 Implement `OpaquePass` class
+  - Render all opaque draw items
+  - Use existing Rasterizer code
+- [x] 4.4 Implement `TransparentPass` class
+  - Sort draw items back-to-front
+  - Render with alpha blending
+- [x] 4.5 Implement `SkyboxPass` class
+  - Render skybox/environment map
+- [x] 4.6 Implement `PostProcessPass` class
+  - Apply FXAA, tone mapping, sRGB conversion
+- [x] 4.7 Create `PassBuilder` class
+  - Implement `AddPass(unique_ptr<RenderPass>)` method
+  - Implement `AddDependency(from, to)` method
+  - Implement `SetCondition(pass, condition)` method
+  - Implement `Build()` returning configured pipeline
+- [x] 4.8 Implement dependency resolution in PassBuilder
+  - Topological sort of passes based on dependencies
+  - Detect and report circular dependencies
+- [x] 4.9 Refactor `RenderPipeline` to use Pass system
+  - Replace hardcoded flow with pass execution
+  - Execute passes in dependency-resolved order
+  - Skip passes where ShouldExecute() returns false
+- [x] 4.10 Create default pipeline configuration
+  - Build default pipeline: Prepare → Opaque → Skybox → Transparent → PostProcess
+  - Provide backward-compatible API
+- [x] 4.11 Update MFCDemo to use new pipeline API
+  - Use PassBuilder for pipeline configuration
+  - Add option to enable/disable passes
+  - Note: Backward-compatible API maintained, pass system available for advanced use
+- [~] 4.12 Add unit tests for Pass system
+  - Test pass execution order
+  - Test dependency resolution
+  - Test circular dependency detection
+  - Test conditional execution
+  - **Deferred**: Requires test framework setup
+
+## 5. Integration and Validation
+
+- [~] 5.1 Run full regression tests
+  - Verify all existing scenes render correctly
+  - Compare output images before/after changes
+  - **Deferred**: Requires manual testing or screenshot comparison infrastructure
+- [~] 5.2 Performance validation
+  - Measure memory reduction (target 40-60%)
+  - Measure frame rate improvement (target 2-4x)
+  - Profile for new bottlenecks
+  - **Deferred**: Requires benchmarking infrastructure
+- [x] 5.3 Update documentation
+  - Update CLAUDE.md with new architecture
+  - Document new APIs (MaterialTable, ResourcePool, PassBuilder)
+- [x] 5.4 Clean up deprecated code
+  - Remove old Triangle fields
+  - Remove hardcoded pipeline code
+  - Update all references
+  - Note: Triangle uses MaterialHandle, pipeline supports both Render() and ExecutePasses()

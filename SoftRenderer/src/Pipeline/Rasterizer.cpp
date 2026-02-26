@@ -2,6 +2,7 @@
 
 #include "Pipeline/FragmentShader.h"
 #include "Pipeline/Clipper.h"
+#include "Pipeline/MaterialTable.h"
 
 #include "Asset/GLTFTypes.h"
 
@@ -110,35 +111,44 @@ struct RasterTriangle {
     Vec3 w0_o_w, w1_o_w, w2_o_w;
     double z0_over_w, z1_over_w, z2_over_w;
     double zMin;
-    PBRMaterial material;
-    int meshIndex;
-    int materialIndex;
-    int primitiveIndex;
-    int nodeIndex;
-    int baseColorTextureIndex;
-    int metallicRoughnessTextureIndex;
-    int normalTextureIndex;
-    int occlusionTextureIndex;
-    int emissiveTextureIndex;
-    int transmissionTextureIndex;
-    int baseColorImageIndex;
-    int metallicRoughnessImageIndex;
-    int normalImageIndex;
-    int occlusionImageIndex;
-    int emissiveImageIndex;
-    int transmissionImageIndex;
-    int baseColorSamplerIndex;
-    int metallicRoughnessSamplerIndex;
-    int normalSamplerIndex;
-    int occlusionSamplerIndex;
-    int emissiveSamplerIndex;
-    int transmissionSamplerIndex;
-    int baseColorTexCoordSet;
-    int metallicRoughnessTexCoordSet;
-    int normalTexCoordSet;
-    int occlusionTexCoordSet;
-    int emissiveTexCoordSet;
-    int transmissionTexCoordSet;
+
+    // Material handle (reference to MaterialTable)
+    MaterialHandle materialId;
+
+    // Material properties (copied from MaterialTable for fast access)
+    Vec3 albedo;
+    double metallic;
+    double roughness;
+    bool doubleSided;
+    double alpha;
+    double transmissionFactor;
+    int alphaMode;
+    double alphaCutoff;
+    Vec3 emissiveFactor;
+    double ior;
+    double specularFactor;
+    Vec3 specularColorFactor;
+
+    // Texture indices
+    int32_t baseColorImageIndex;
+    int32_t metallicRoughnessImageIndex;
+    int32_t normalImageIndex;
+    int32_t occlusionImageIndex;
+    int32_t emissiveImageIndex;
+    int32_t transmissionImageIndex;
+    int32_t baseColorSamplerIndex;
+    int32_t metallicRoughnessSamplerIndex;
+    int32_t normalSamplerIndex;
+    int32_t occlusionSamplerIndex;
+    int32_t emissiveSamplerIndex;
+    int32_t transmissionSamplerIndex;
+    int32_t baseColorTexCoordSet;
+    int32_t metallicRoughnessTexCoordSet;
+    int32_t normalTexCoordSet;
+    int32_t occlusionTexCoordSet;
+    int32_t emissiveTexCoordSet;
+    int32_t transmissionTexCoordSet;
+
     int minX, maxX, minY, maxY;
     double area;
     double invArea;
@@ -374,7 +384,14 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
             if (rt.area == 0.0) {
                 continue;
             }
-            if (rt.area <= 0.0 && !tri.material.doubleSided) {
+
+            // Get material data from MaterialTable
+            const MaterialTable* matTable = m_frameContext.materialTable;
+            MaterialHandle matId = tri.materialId;
+
+            // Lookup doubleSided for backface culling check
+            bool doubleSided = matTable ? matTable->GetDoubleSided(matId) : false;
+            if (rt.area <= 0.0 && !doubleSided) {
                 continue;
             }
 
@@ -482,35 +499,78 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
             rt.z2_over_w = p2.z;
             rt.zMin = std::min({rt.z0_over_w, rt.z1_over_w, rt.z2_over_w});
 
-            rt.material = tri.material;
-            rt.meshIndex = tri.meshIndex;
-            rt.materialIndex = tri.materialIndex;
-            rt.primitiveIndex = tri.primitiveIndex;
-            rt.nodeIndex = tri.nodeIndex;
-            rt.baseColorTextureIndex = tri.baseColorTextureIndex;
-            rt.metallicRoughnessTextureIndex = tri.metallicRoughnessTextureIndex;
-            rt.normalTextureIndex = tri.normalTextureIndex;
-            rt.occlusionTextureIndex = tri.occlusionTextureIndex;
-            rt.emissiveTextureIndex = tri.emissiveTextureIndex;
-            rt.transmissionTextureIndex = tri.transmissionTextureIndex;
-            rt.baseColorImageIndex = tri.baseColorImageIndex;
-            rt.metallicRoughnessImageIndex = tri.metallicRoughnessImageIndex;
-            rt.normalImageIndex = tri.normalImageIndex;
-            rt.occlusionImageIndex = tri.occlusionImageIndex;
-            rt.emissiveImageIndex = tri.emissiveImageIndex;
-            rt.transmissionImageIndex = tri.transmissionImageIndex;
-            rt.baseColorSamplerIndex = tri.baseColorSamplerIndex;
-            rt.metallicRoughnessSamplerIndex = tri.metallicRoughnessSamplerIndex;
-            rt.normalSamplerIndex = tri.normalSamplerIndex;
-            rt.occlusionSamplerIndex = tri.occlusionSamplerIndex;
-            rt.emissiveSamplerIndex = tri.emissiveSamplerIndex;
-            rt.transmissionSamplerIndex = tri.transmissionSamplerIndex;
-            rt.baseColorTexCoordSet = tri.baseColorTexCoordSet;
-            rt.metallicRoughnessTexCoordSet = tri.metallicRoughnessTexCoordSet;
-            rt.normalTexCoordSet = tri.normalTexCoordSet;
-            rt.occlusionTexCoordSet = tri.occlusionTexCoordSet;
-            rt.emissiveTexCoordSet = tri.emissiveTexCoordSet;
-            rt.transmissionTexCoordSet = tri.transmissionTexCoordSet;
+            // Copy material data from MaterialTable
+            rt.materialId = matId;
+            if (matTable) {
+                rt.albedo = matTable->GetAlbedo(matId);
+                rt.metallic = matTable->GetMetallic(matId);
+                rt.roughness = matTable->GetRoughness(matId);
+                rt.doubleSided = matTable->GetDoubleSided(matId);
+                rt.alpha = matTable->GetAlpha(matId);
+                rt.transmissionFactor = matTable->GetTransmissionFactor(matId);
+                rt.alphaMode = matTable->GetAlphaMode(matId);
+                rt.alphaCutoff = matTable->GetAlphaCutoff(matId);
+                rt.emissiveFactor = matTable->GetEmissiveFactor(matId);
+                rt.ior = matTable->GetIOR(matId);
+                rt.specularFactor = matTable->GetSpecularFactor(matId);
+                rt.specularColorFactor = matTable->GetSpecularColorFactor(matId);
+
+                rt.baseColorImageIndex = matTable->GetBaseColorImageIndex(matId);
+                rt.metallicRoughnessImageIndex = matTable->GetMetallicRoughnessImageIndex(matId);
+                rt.normalImageIndex = matTable->GetNormalImageIndex(matId);
+                rt.occlusionImageIndex = matTable->GetOcclusionImageIndex(matId);
+                rt.emissiveImageIndex = matTable->GetEmissiveImageIndex(matId);
+                rt.transmissionImageIndex = matTable->GetTransmissionImageIndex(matId);
+
+                rt.baseColorSamplerIndex = matTable->GetBaseColorSamplerIndex(matId);
+                rt.metallicRoughnessSamplerIndex = matTable->GetMetallicRoughnessSamplerIndex(matId);
+                rt.normalSamplerIndex = matTable->GetNormalSamplerIndex(matId);
+                rt.occlusionSamplerIndex = matTable->GetOcclusionSamplerIndex(matId);
+                rt.emissiveSamplerIndex = matTable->GetEmissiveSamplerIndex(matId);
+                rt.transmissionSamplerIndex = matTable->GetTransmissionSamplerIndex(matId);
+
+                rt.baseColorTexCoordSet = matTable->GetBaseColorTexCoordSet(matId);
+                rt.metallicRoughnessTexCoordSet = matTable->GetMetallicRoughnessTexCoordSet(matId);
+                rt.normalTexCoordSet = matTable->GetNormalTexCoordSet(matId);
+                rt.occlusionTexCoordSet = matTable->GetOcclusionTexCoordSet(matId);
+                rt.emissiveTexCoordSet = matTable->GetEmissiveTexCoordSet(matId);
+                rt.transmissionTexCoordSet = matTable->GetTransmissionTexCoordSet(matId);
+            } else {
+                // Default material values
+                rt.albedo = Vec3{1.0, 1.0, 1.0};
+                rt.metallic = 0.0;
+                rt.roughness = 0.5;
+                rt.doubleSided = false;
+                rt.alpha = 1.0;
+                rt.transmissionFactor = 0.0;
+                rt.alphaMode = 0;
+                rt.alphaCutoff = 0.5;
+                rt.emissiveFactor = Vec3{0.0, 0.0, 0.0};
+                rt.ior = 1.5;
+                rt.specularFactor = 1.0;
+                rt.specularColorFactor = Vec3{1.0, 1.0, 1.0};
+
+                rt.baseColorImageIndex = -1;
+                rt.metallicRoughnessImageIndex = -1;
+                rt.normalImageIndex = -1;
+                rt.occlusionImageIndex = -1;
+                rt.emissiveImageIndex = -1;
+                rt.transmissionImageIndex = -1;
+
+                rt.baseColorSamplerIndex = -1;
+                rt.metallicRoughnessSamplerIndex = -1;
+                rt.normalSamplerIndex = -1;
+                rt.occlusionSamplerIndex = -1;
+                rt.emissiveSamplerIndex = -1;
+                rt.transmissionSamplerIndex = -1;
+
+                rt.baseColorTexCoordSet = 0;
+                rt.metallicRoughnessTexCoordSet = 0;
+                rt.normalTexCoordSet = 0;
+                rt.occlusionTexCoordSet = 0;
+                rt.emissiveTexCoordSet = 0;
+                rt.transmissionTexCoordSet = 0;
+            }
 
             localTris.push_back(rt);
         }
@@ -677,7 +737,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     // Sort each tile's triangles:
     // - Opaque/Mask: front-to-back (early-z benefit)
     // - Blend: back-to-front (correct alpha compositing)
-    const bool isBatchTransparent = !rasterTris.empty() && rasterTris[0].material.alphaMode == 2;
+    const bool isBatchTransparent = !rasterTris.empty() && rasterTris[0].alphaMode == 2;
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < totalTiles; ++t) {
         const size_t begin = binOffsets[static_cast<size_t>(t)];
@@ -765,12 +825,21 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                 // Build per-triangle fragment context ONCE (not per-pixel!)
                 FragmentContext fragCtx;
                 fragCtx.cameraPos = m_frameContext.cameraPos;
-                fragCtx.material = &rt.material;
-                fragCtx.lights = &m_frameContext.lights;
-                fragCtx.ambientColor = m_frameContext.ambientColor;
-                fragCtx.environmentMap = m_frameContext.environmentMap;
-                fragCtx.images = m_frameContext.images;
-                fragCtx.samplers = m_frameContext.samplers;
+
+                // Copy material properties from RasterTriangle
+                fragCtx.albedo = rt.albedo;
+                fragCtx.metallic = rt.metallic;
+                fragCtx.roughness = rt.roughness;
+                fragCtx.doubleSided = rt.doubleSided;
+                fragCtx.alpha = rt.alpha;
+                fragCtx.transmissionFactor = rt.transmissionFactor;
+                fragCtx.alphaMode = rt.alphaMode;
+                fragCtx.alphaCutoff = rt.alphaCutoff;
+                fragCtx.emissiveFactor = rt.emissiveFactor;
+                fragCtx.ior = rt.ior;
+                fragCtx.specularFactor = rt.specularFactor;
+                fragCtx.specularColorFactor = rt.specularColorFactor;
+
                 fragCtx.baseColorImageIndex = rt.baseColorImageIndex;
                 fragCtx.metallicRoughnessImageIndex = rt.metallicRoughnessImageIndex;
                 fragCtx.normalImageIndex = rt.normalImageIndex;
@@ -789,6 +858,12 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                 fragCtx.occlusionTexCoordSet = rt.occlusionTexCoordSet;
                 fragCtx.emissiveTexCoordSet = rt.emissiveTexCoordSet;
                 fragCtx.transmissionTexCoordSet = rt.transmissionTexCoordSet;
+
+                fragCtx.lights = &m_frameContext.lights;
+                fragCtx.ambientColor = m_frameContext.ambientColor;
+                fragCtx.environmentMap = m_frameContext.environmentMap;
+                fragCtx.images = m_frameContext.images;
+                fragCtx.samplers = m_frameContext.samplers;
                 fragCtx.tangentW = rt.tangentW;
                 
                 // Use globally precomputed light data (pointer, no copy)
@@ -810,8 +885,8 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                 double w2_row = rt.A01 * pxStart + rt.B01 * pyBase + rt.C01;
 
                 // Check if we need alpha testing or alpha blending for this triangle
-                const bool needsAlphaTest = (rt.material.alphaMode == 1 && rt.baseColorImageIndex >= 0);
-                const bool needsAlphaBlend = (rt.material.alphaMode == 2);
+                const bool needsAlphaTest = (rt.alphaMode == 1 && rt.baseColorImageIndex >= 0);
+                const bool needsAlphaBlend = (rt.alphaMode == 2);
 
                 // SIMD constants for edge function increments (4 pixels at a time)
                 const __m256d A12_4 = _mm256_set1_pd(rt.A12);
@@ -905,25 +980,25 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                             varying.texCoord = InterpolateVec2(rt.t0_over_w, rt.t1_over_w, rt.t2_over_w, bw0, bw1, bw2, wVal);
                             varying.texCoord1 = InterpolateVec2(rt.t0_1_over_w, rt.t1_1_over_w, rt.t2_1_over_w, bw0, bw1, bw2, wVal);
                             varying.color = InterpolateVec4(rt.c0_over_w, rt.c1_over_w, rt.c2_over_w, bw0, bw1, bw2, wVal);
-                            varying.tangent = (rt.normalImageIndex >= 0) 
+                            varying.tangent = (rt.normalImageIndex >= 0)
                                 ? InterpolateVec3(rt.tg0_over_w, rt.tg1_over_w, rt.tg2_over_w, bw0, bw1, bw2, wVal)
                                 : Vec3{0.0, 0.0, 0.0};
 
-                            double alpha = rt.material.alpha;
+                            double alpha = rt.alpha;
                             if (rt.baseColorImageIndex >= 0) {
                                 Vec2 baseUv = (rt.baseColorTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
                                 alpha *= SampleBaseColorAlpha(m_frameContext, rt.baseColorImageIndex, rt.baseColorSamplerIndex, baseUv);
                             }
                             alpha *= std::clamp(varying.color.w, 0.0, 1.0);
-                            if (rt.material.transmissionFactor > 0.0 || rt.transmissionImageIndex >= 0) {
-                                double t = std::clamp(rt.material.transmissionFactor, 0.0, 1.0);
+                            if (rt.transmissionFactor > 0.0 || rt.transmissionImageIndex >= 0) {
+                                double t = std::clamp(rt.transmissionFactor, 0.0, 1.0);
                                 Vec2 tUv = (rt.transmissionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
                                 if (rt.transmissionImageIndex >= 0) {
                                     t *= SampleTransmissionFactor(m_frameContext, rt.transmissionImageIndex, rt.transmissionSamplerIndex, tUv);
                                 }
                                 alpha *= (1.0 - std::clamp(t, 0.0, 1.0));
                             }
-                            if (needsAlphaTest && alpha < rt.material.alphaCutoff) continue;
+                            if (needsAlphaTest && alpha < rt.alphaCutoff) continue;
 
                             double effectiveAlpha = alpha;
                             localPixelsShaded++;
@@ -995,21 +1070,21 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
                             ? InterpolateVec3(rt.tg0_over_w, rt.tg1_over_w, rt.tg2_over_w, bw0, bw1, bw2, wVal)
                             : Vec3{0.0, 0.0, 0.0};
 
-                        double alpha = rt.material.alpha;
+                        double alpha = rt.alpha;
                         if (rt.baseColorImageIndex >= 0) {
                             Vec2 baseUv = (rt.baseColorTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
                             alpha *= SampleBaseColorAlpha(m_frameContext, rt.baseColorImageIndex, rt.baseColorSamplerIndex, baseUv);
                         }
                         alpha *= std::clamp(varying.color.w, 0.0, 1.0);
-                        if (rt.material.transmissionFactor > 0.0 || rt.transmissionImageIndex >= 0) {
-                            double t = std::clamp(rt.material.transmissionFactor, 0.0, 1.0);
+                        if (rt.transmissionFactor > 0.0 || rt.transmissionImageIndex >= 0) {
+                            double t = std::clamp(rt.transmissionFactor, 0.0, 1.0);
                             Vec2 tUv = (rt.transmissionTexCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
                             if (rt.transmissionImageIndex >= 0) {
                                 t *= SampleTransmissionFactor(m_frameContext, rt.transmissionImageIndex, rt.transmissionSamplerIndex, tUv);
                             }
                             alpha *= (1.0 - std::clamp(t, 0.0, 1.0));
                         }
-                        if (needsAlphaTest && alpha < rt.material.alphaCutoff) {
+                        if (needsAlphaTest && alpha < rt.alphaCutoff) {
                             w0 += rt.A12;
                             w1 += rt.A20;
                             w2 += rt.A01;

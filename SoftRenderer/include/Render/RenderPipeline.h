@@ -1,12 +1,15 @@
 #pragma once
 
 #include <vector>
+#include <memory>
 #include "Render/PassContext.h"
 #include "Scene/RenderQueue.h"
+#include "Pipeline/RenderPass.h"
 
 namespace SR {
 
 struct Triangle;
+class MaterialTable;
 
 /**
  * @brief 渲染管线统计数据，汇总各个阶段的性能和指标
@@ -23,6 +26,10 @@ struct RenderStats {
 
 /**
  * @brief 渲染管线类，协调几何处理、光栅化和后处理流程
+ *
+ * 支持两种渲染模式：
+ * 1. 传统模式：使用 Render() 方法执行固定管线流程
+ * 2. Pass 模式：使用 ExecutePasses() 执行可配置的 Pass 管线
  */
 class RenderPipeline {
 public:
@@ -35,11 +42,34 @@ public:
     void RenderSkybox(const PassContext& pass) const;
     /** @brief 执行后处理流程 (FXAA, ToneMapping 等) */
     void PostProcess(const PassContext& pass) const;
-    /** 
-     * @brief 执行完整渲染流程 (Prepare + Draw + Skybox + PostProcess) 
+    /**
+     * @brief 执行完整渲染流程 (Prepare + Draw + Skybox + PostProcess)
      * @return 该帧的完整渲染统计信息
      */
     RenderStats Render(const RenderQueue& queue, const PassContext& pass) const;
+
+    /**
+     * @brief 使用 Pass 系统执行渲染管线
+     * @param passes 按依赖关系排序的 Pass 列表
+     * @param context 渲染上下文
+     * @return 汇总的渲染统计信息
+     */
+    RenderStats ExecutePasses(std::vector<std::unique_ptr<RenderPass>>& passes,
+                              RenderContext& context) const;
+
+    /**
+     * @brief 执行单个 Pass
+     * @param pass Pass 实例
+     * @param context 渲染上下文
+     * @return Pass 统计信息
+     */
+    PassStats ExecutePass(RenderPass& pass, RenderContext& context) const;
+
+private:
+    /** @brief 内部绘制实现，使用外部提供的 MaterialTable */
+    RenderStats DrawWithMaterialTable(const RenderQueue& queue, const PassContext& pass,
+                                       MaterialTable& materialTable,
+                                       std::vector<Triangle>* outDeferredBlend) const;
 };
 
 } // namespace SR

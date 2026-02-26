@@ -11,6 +11,7 @@ namespace SR {
 struct GLTFImage;
 struct GLTFSampler;
 class EnvironmentMap;
+class MaterialTable;
 
 struct FrameContext {
     Mat4 view = Mat4::Identity();
@@ -21,6 +22,7 @@ struct FrameContext {
     const std::vector<GLTFImage>* images = nullptr;
     const std::vector<GLTFSampler>* samplers = nullptr;
     const EnvironmentMap* environmentMap = nullptr;  ///< IBL 环境贴图（可选）
+    const MaterialTable* materialTable = nullptr;    ///< 材质表 (SOA 布局)
 };
 
 } // namespace SR
