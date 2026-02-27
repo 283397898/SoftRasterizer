@@ -2,6 +2,7 @@
 
 #include "Math/Vec3.h"
 #include "Math/Vec4.h"
+#include <immintrin.h>
 
 namespace SR {
 
@@ -28,16 +29,39 @@ struct Mat4 {
     /** @brief 创建观察矩阵 */
     static Mat4 LookAt(const Vec3& eye, const Vec3& target, const Vec3& up);
 
-    /** @brief 矩阵乘以四维向量 */
-    Vec4 Multiply(const Vec4& v) const {
-        Vec4 out{};
-        out.x = v.x * m[0][0] + v.y * m[1][0] + v.z * m[2][0] + v.w * m[3][0];
-        out.y = v.x * m[0][1] + v.y * m[1][1] + v.z * m[2][1] + v.w * m[3][1];
-        out.z = v.x * m[0][2] + v.y * m[1][2] + v.z * m[2][2] + v.w * m[3][2];
-        out.w = v.x * m[0][3] + v.y * m[1][3] + v.z * m[2][3] + v.w * m[3][3];
+    /**
+     * @brief 矩阵乘以四维向量（AVX2+FMA3 优化）
+     *
+     * 计算 result[j] = Σ_i v[i] * m[i][j]，即 v^T * M。
+     * 每行 m[i] 恰好 4 个 double = 1 个 __m256d 寄存器。
+     * 用 3 次 FMA 替代 16 mul + 12 add，指令数减少 ~4×。
+     */
+    inline Vec4 Multiply(const Vec4& v) const {
+        // 加载矩阵的 4 行（每行 4 个 double，连续内存）
+        __m256d row0 = _mm256_loadu_pd(m[0]);
+        __m256d row1 = _mm256_loadu_pd(m[1]);
+        __m256d row2 = _mm256_loadu_pd(m[2]);
+        __m256d row3 = _mm256_loadu_pd(m[3]);
+
+        // 广播向量的每个分量
+        __m256d vx = _mm256_set1_pd(v.x);
+        __m256d vy = _mm256_set1_pd(v.y);
+        __m256d vz = _mm256_set1_pd(v.z);
+        __m256d vw = _mm256_set1_pd(v.w);
+
+        // result = v.x*row0 + v.y*row1 + v.z*row2 + v.w*row3
+        // 使用 FMA3: fmadd(a, b, c) = a*b + c，流水线友好
+        __m256d result = _mm256_mul_pd(vx, row0);
+        result = _mm256_fmadd_pd(vy, row1, result);
+        result = _mm256_fmadd_pd(vz, row2, result);
+        result = _mm256_fmadd_pd(vw, row3, result);
+
+        // Vec4 有 4 个连续 double (x,y,z,w)，直接存储
+        Vec4 out;
+        _mm256_storeu_pd(&out.x, result);
         return out;
     }
-    /** @brief 矩阵乘法 */
+    /** @brief 矩阵乘法（AVX2+FMA3 优化） */
     Mat4 operator*(const Mat4& rhs) const;
     /** @brief 计算逆矩阵（通用 4x4 逆矩阵，基于伴随矩阵法） */
     Mat4 Inverse() const;

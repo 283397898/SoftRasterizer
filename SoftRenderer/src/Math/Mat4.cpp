@@ -140,18 +140,33 @@ Mat4 Mat4::LookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
 }
 
 /**
- * @brief 矩阵乘法
+ * @brief 矩阵乘法（AVX2+FMA3 优化）
+ *
+ * result[row][j] = Σ_k m[row][k] * rhs.m[k][j]
+ * 即对每个输出行：result_row = m[row][0]*rhs_row0 + ... + m[row][3]*rhs_row3
+ * 每行用 3 次 FMA + 1 次 MUL，共 4 行 = 4 MUL + 12 FMA 替代原 64 MUL + 48 ADD。
  */
 Mat4 Mat4::operator*(const Mat4& rhs) const {
-    Mat4 result{};
+    Mat4 result;
+
+    // 预加载 rhs 的 4 行到寄存器（复用于每个输出行）
+    __m256d rhs0 = _mm256_loadu_pd(rhs.m[0]);
+    __m256d rhs1 = _mm256_loadu_pd(rhs.m[1]);
+    __m256d rhs2 = _mm256_loadu_pd(rhs.m[2]);
+    __m256d rhs3 = _mm256_loadu_pd(rhs.m[3]);
+
     for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            double sum = 0.0;
-            for (int k = 0; k < 4; ++k) {
-                sum += m[row][k] * rhs.m[k][col];
-            }
-            result.m[row][col] = sum;
-        }
+        __m256d a0 = _mm256_set1_pd(m[row][0]);
+        __m256d a1 = _mm256_set1_pd(m[row][1]);
+        __m256d a2 = _mm256_set1_pd(m[row][2]);
+        __m256d a3 = _mm256_set1_pd(m[row][3]);
+
+        __m256d r = _mm256_mul_pd(a0, rhs0);
+        r = _mm256_fmadd_pd(a1, rhs1, r);
+        r = _mm256_fmadd_pd(a2, rhs2, r);
+        r = _mm256_fmadd_pd(a3, rhs3, r);
+
+        _mm256_storeu_pd(result.m[row], r);
     }
     return result;
 }
