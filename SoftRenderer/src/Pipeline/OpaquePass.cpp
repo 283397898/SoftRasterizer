@@ -8,13 +8,36 @@
 #include "Core/Framebuffer.h"
 #include "Core/DepthBuffer.h"
 #include "Scene/RenderQueue.h"
+#include "Utils/DebugLog.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <omp.h>
 
 namespace SR {
+
+namespace {
+
+const char* ScheduleName(OpenMPSchedulePolicy policy) {
+    switch (policy) {
+    case OpenMPSchedulePolicy::Static:  return "static";
+    case OpenMPSchedulePolicy::Guided:  return "guided";
+    case OpenMPSchedulePolicy::Dynamic:
+    default:                            return "dynamic";
+    }
+}
+
+} // namespace
+
+/// 持久化的每线程构建缓冲区（避免每帧 malloc/free 32 个大 vector）
+static constexpr int kMaxBuildThreads = 64;
+static std::vector<Triangle> g_perThreadOpaque[kMaxBuildThreads];
+static std::vector<Triangle> g_perThreadBlend[kMaxBuildThreads];
+static uint64_t g_perThreadBuilt[kMaxBuildThreads] = {};
 
 PassStats OpaquePass::Execute(RenderContext& context) {
     PassStats stats;
@@ -22,6 +45,9 @@ PassStats OpaquePass::Execute(RenderContext& context) {
     if (!context.renderQueue || !context.framebuffer || !context.depthBuffer || !context.frameContext || !context.materialTable) {
         return stats;
     }
+
+    using Clock = std::chrono::high_resolution_clock;
+    auto passBegin = Clock::now();
 
     // 将帧级材质表注入 FrameContext，供 Rasterizer 中 FragmentShader 访问
     FrameContext frameWithMaterials = *context.frameContext;
@@ -31,9 +57,9 @@ PassStats OpaquePass::Execute(RenderContext& context) {
     rasterizer.SetTargets(context.framebuffer, context.depthBuffer);
     rasterizer.SetFrameContext(frameWithMaterials);
 
-    std::vector<Triangle> opaqueMaskTriangles;
     std::vector<Triangle> blendTriangles;
     std::vector<DrawItem> sortedItems = context.renderQueue->GetItems();
+    auto copyEnd = Clock::now();
 
     // 排序键：取模型矩阵的平移列到相机的距离平方（避免开方以节省时间）
     const Vec3 cameraPos = frameWithMaterials.cameraPos;
@@ -62,9 +88,10 @@ PassStats OpaquePass::Execute(RenderContext& context) {
         }
         return a.mesh < b.mesh;
     });
+    auto sortEnd = Clock::now();
 
     const int numItems = static_cast<int>(sortedItems.size());
-    const int maxThreads = omp_get_max_threads();
+    const int maxThreads = std::min(omp_get_max_threads(), kMaxBuildThreads);
 
     // 单线程预注册：为每个 DrawItem 注册材质到 MaterialTable，获取预计算的 MaterialHandle
     std::vector<MaterialHandle> materialHandles(static_cast<size_t>(numItems), InvalidMaterialHandle);
@@ -76,25 +103,31 @@ PassStats OpaquePass::Execute(RenderContext& context) {
         MaterialParams params = BuildMaterialParams(*item.material, item);
         materialHandles[static_cast<size_t>(i)] = context.materialTable->AddMaterial(params);
     }
-
-    std::vector<std::vector<Triangle>> perThreadOpaque(maxThreads);
-    std::vector<std::vector<Triangle>> perThreadBlend(maxThreads);
-    std::vector<uint64_t> perThreadBuilt(maxThreads, 0);
+    auto matRegEnd = Clock::now();
 
     using Clock = std::chrono::high_resolution_clock;
     auto buildStart = Clock::now();
 
-    // 并行几何处理：每个线程使用独立的 GeometryProcessor 和三角形缓冲
+    const OpenMPTuningOptions& ompCfg = frameWithMaterials.openmp;
+
+    // 并行几何处理：每个线程使用独立的 GeometryProcessor 和持久化三角形缓冲
     // schedule(dynamic, 1) 适合不同 DrawItem 耗时差异较大的场景
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& localOpaque = perThreadOpaque[tid];
-        auto& localBlend = perThreadBlend[tid];
+        auto& localOpaque = g_perThreadOpaque[tid];
+        auto& localBlend = g_perThreadBlend[tid];
+        localOpaque.clear();
+        localBlend.clear();
+        g_perThreadBuilt[tid] = 0;
         GeometryProcessor localGP;
         std::vector<Triangle> localItemTriangles;
 
+#if defined(SR_INTEL_OMP)
+        #pragma omp for schedule(guided, 1)
+#else
         #pragma omp for schedule(dynamic, 1)
+#endif
         for (int i = 0; i < numItems; ++i) {
             const DrawItem& item = sortedItems[static_cast<size_t>(i)];
             if (!item.mesh || !item.material) {
@@ -110,7 +143,7 @@ PassStats OpaquePass::Execute(RenderContext& context) {
                 materialHandles[static_cast<size_t>(i)],
                 localItemTriangles);
 
-            perThreadBuilt[tid] += localGP.GetLastTriangleCount();
+            g_perThreadBuilt[tid] += localGP.GetLastTriangleCount();
             if (localItemTriangles.empty()) {
                 continue;
             }
@@ -126,27 +159,102 @@ PassStats OpaquePass::Execute(RenderContext& context) {
     auto buildEnd = Clock::now();
     stats.buildMs = std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
 
-    // 合并各线程的三角形缓冲（move 语义，避免拷贝）
-    for (int t = 0; t < maxThreads; ++t) {
-        stats.trianglesBuilt += perThreadBuilt[t];
-        opaqueMaskTriangles.insert(opaqueMaskTriangles.end(),
-            std::make_move_iterator(perThreadOpaque[t].begin()),
-            std::make_move_iterator(perThreadOpaque[t].end()));
-        blendTriangles.insert(blendTriangles.end(),
-            std::make_move_iterator(perThreadBlend[t].begin()),
-            std::make_move_iterator(perThreadBlend[t].end()));
+    if (ompCfg.enableProfiling) {
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer),
+            "[SR-PERF] OpaquePass build: schedule=%s,%d threads=%d items=%d buildMs=%.3f\n",
+            ScheduleName(ompCfg.drawItemBuildSchedule),
+            std::max(1, ompCfg.drawItemBuildChunk),
+            omp_get_max_threads(),
+            numItems,
+            stats.buildMs);
+        SR_PERF_LOG(buffer);
+
+        // 每线程三角形分布
+        for (int base = 0; base < maxThreads; base += 8) {
+            char perThread[512];
+            int off = std::snprintf(perThread, sizeof(perThread), "[SR-PERF] Build T%02d-%02d:", base, std::min(base + 7, maxThreads - 1));
+            for (int j = base; j < std::min(base + 8, maxThreads); ++j) {
+                off += std::snprintf(perThread + off, sizeof(perThread) - static_cast<size_t>(off),
+                    " [%d: %llutri]",
+                    j,
+                    static_cast<unsigned long long>(g_perThreadBuilt[static_cast<size_t>(j)]));
+            }
+            off += std::snprintf(perThread + off, sizeof(perThread) - static_cast<size_t>(off), "\n");
+            SR_PERF_LOG(perThread);
+        }
     }
 
+    // 合并各线程的三角形缓冲（并行前缀和 + 并行搬运，避免单线程瓶颈）
+    auto mergeStart = Clock::now();
+
+    // 1) 计算 prefix sums（单线程，O(maxThreads) 很快）
+    std::vector<size_t> opaqueOffsets(static_cast<size_t>(maxThreads) + 1, 0);
+    std::vector<size_t> blendOffsets(static_cast<size_t>(maxThreads) + 1, 0);
+    for (int t = 0; t < maxThreads; ++t) {
+        stats.trianglesBuilt += g_perThreadBuilt[t];
+        opaqueOffsets[static_cast<size_t>(t) + 1] = opaqueOffsets[static_cast<size_t>(t)] + g_perThreadOpaque[t].size();
+        blendOffsets[static_cast<size_t>(t) + 1] = blendOffsets[static_cast<size_t>(t)] + g_perThreadBlend[t].size();
+    }
+    const size_t totalOpaque = opaqueOffsets[static_cast<size_t>(maxThreads)];
+    const size_t totalBlend = blendOffsets[static_cast<size_t>(maxThreads)];
+
+    // 2) opaque: malloc + 并行 memcpy（避免 vector::resize 的默认构造开销）
+    //    blend: reserve + 串行 insert（数量少，无需优化）
+    Triangle* opaqueRaw = nullptr;
+    if (totalOpaque > 0) {
+        opaqueRaw = static_cast<Triangle*>(std::malloc(totalOpaque * sizeof(Triangle)));
+        #pragma omp parallel for schedule(static, 1)
+        for (int t = 0; t < maxThreads; ++t) {
+            if (!g_perThreadOpaque[t].empty()) {
+                std::memcpy(opaqueRaw + opaqueOffsets[static_cast<size_t>(t)],
+                            g_perThreadOpaque[t].data(),
+                            g_perThreadOpaque[t].size() * sizeof(Triangle));
+            }
+        }
+    }
+    blendTriangles.clear();
+    blendTriangles.reserve(totalBlend);
+    for (int t = 0; t < maxThreads; ++t) {
+        if (!g_perThreadBlend[t].empty()) {
+            blendTriangles.insert(blendTriangles.end(),
+                std::make_move_iterator(g_perThreadBlend[t].begin()),
+                std::make_move_iterator(g_perThreadBlend[t].end()));
+        }
+    }
+    auto mergeEnd = Clock::now();
+
     // 光栅化不透明/Mask 三角形（启用 Early-Z）
-    if (!opaqueMaskTriangles.empty()) {
+    if (totalOpaque > 0) {
         auto rastStart = Clock::now();
-        RasterStats rastStats = rasterizer.RasterizeTriangles(opaqueMaskTriangles);
+        RasterStats rastStats = rasterizer.RasterizeTriangles(opaqueRaw, totalOpaque);
         auto rastEnd = Clock::now();
+        std::free(opaqueRaw);
+        opaqueRaw = nullptr;
         stats.rastMs += std::chrono::duration<double, std::milli>(rastEnd - rastStart).count();
         stats.trianglesClipped += rastStats.trianglesClipped;
         stats.trianglesRendered += rastStats.trianglesRaster;
         stats.pixelsTested += rastStats.pixelsTested;
         stats.pixelsShaded += rastStats.pixelsShaded;
+    }
+    auto passEnd = Clock::now();
+
+    // 详细内部阶段耗时
+    {
+        double copyMs   = std::chrono::duration<double, std::milli>(copyEnd - passBegin).count();
+        double sortMs   = std::chrono::duration<double, std::milli>(sortEnd - copyEnd).count();
+        double matMs    = std::chrono::duration<double, std::milli>(matRegEnd - sortEnd).count();
+        double mergeMs  = std::chrono::duration<double, std::milli>(mergeEnd - mergeStart).count();
+        double rastMs   = stats.rastMs;
+        double totalMs  = std::chrono::duration<double, std::milli>(passEnd - passBegin).count();
+        double gapMs    = totalMs - copyMs - sortMs - matMs - stats.buildMs - mergeMs - rastMs;
+
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "[SR-PERF] OpaquePass detail(ms): copy=%.3f sort=%.3f matReg=%.3f build=%.3f merge=%.3f rast=%.3f total=%.3f gap=%.3f opaqueT=%zu blendT=%zu\n",
+            copyMs, sortMs, matMs, stats.buildMs, mergeMs, rastMs, totalMs, gapMs,
+            totalOpaque, blendTriangles.size());
+        SR_PERF_LOG(buf);
     }
 
     // 将半透明三角形传递给 TransparentPass（通过 RenderContext 共享）
@@ -212,7 +320,11 @@ PassStats SkyboxPass::Execute(RenderContext& context) {
     Mat4 invVP = vp.Inverse();
 
     // 并行遍历所有像素：只处理深度为 1.0（远平面）的像素（未被几何覆盖）
-    #pragma omp parallel for schedule(static)
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided)
+#else
+    #pragma omp parallel for schedule(dynamic)
+#endif
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             size_t idx = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
