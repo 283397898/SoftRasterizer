@@ -42,6 +42,9 @@ target_include_directories(SoftRenderer PUBLIC
 )
 
 target_compile_definitions(SoftRenderer PRIVATE SOFTRENDERER_EXPORTS NOMINMAX)
+target_compile_definitions(SoftRenderer PRIVATE
+    $<$<CXX_COMPILER_ID:IntelLLVM>:SR_INTEL_OMP>
+)
 
 target_link_libraries(SoftRenderer PRIVATE OpenMP::OpenMP_CXX)
 
@@ -58,17 +61,17 @@ if (MSVC)
     target_compile_options(SoftRenderer PRIVATE
         $<$<CONFIG:Release>:/O2>
         $<$<CONFIG:Release>:/fp:fast>
-        $<$<CONFIG:Release>:/arch:AVX>
+        $<$<CONFIG:Release>:/arch:AVX2>
         $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:IntelLLVM>:/Qiopenmp>>
         $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:IntelLLVM>>:/openmp>>
         $<$<CONFIG:Debug>:/Od>
         $<$<CONFIG:Debug>:/Zi>
-        $<$<CONFIG:Debug>:/arch:AVX>
+        $<$<CONFIG:Debug>:/arch:AVX2>
         $<$<CONFIG:Debug>:$<$<CXX_COMPILER_ID:IntelLLVM>:/Qiopenmp>>
         $<$<CONFIG:Debug>:$<$<NOT:$<CXX_COMPILER_ID:IntelLLVM>>:/openmp>>
     )
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    target_compile_options(SoftRenderer PRIVATE /clang:-mavx)
+    target_compile_options(SoftRenderer PRIVATE /clang:-mavx2 /clang:-mfma)
 endif()

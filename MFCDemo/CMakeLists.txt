@@ -13,9 +13,17 @@ target_include_directories(MFCDemo PRIVATE
 if (MSVC)
     target_compile_definitions(MFCDemo PRIVATE _UNICODE UNICODE)
     target_compile_options(MFCDemo PRIVATE /utf-8)
+    target_compile_options(MFCDemo PRIVATE
+        $<$<CONFIG:Release>:/arch:AVX2>
+        $<$<CONFIG:Debug>:/arch:AVX2>
+    )
     set_target_properties(MFCDemo PROPERTIES
         WIN32_EXECUTABLE TRUE
     )
+endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    target_compile_options(MFCDemo PRIVATE /clang:-mavx2 /clang:-mfma)
 endif()
 
 if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
