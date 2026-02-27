@@ -80,6 +80,8 @@ public:
     void SetFrameContext(const FrameContext& context);
     /** @brief 执行光栅化渲染 */
     RasterStats RasterizeTriangles(const std::vector<Triangle>& triangles);
+    /** @brief 执行光栅化渲染（原始指针版本，避免 vector 开销） */
+    RasterStats RasterizeTriangles(const Triangle* triangles, size_t count);
 
 private:
     Framebuffer* m_framebuffer = nullptr;

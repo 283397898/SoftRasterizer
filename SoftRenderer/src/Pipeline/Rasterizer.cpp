@@ -12,8 +12,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include <cstdio>
+#include <chrono>
+#include <limits>
 #include <omp.h>
 
 #include <immintrin.h>
@@ -21,6 +24,52 @@
 namespace SR {
 
 namespace {
+
+const char* ScheduleName(OpenMPSchedulePolicy policy) {
+    switch (policy) {
+    case OpenMPSchedulePolicy::Static:  return "static";
+    case OpenMPSchedulePolicy::Guided:  return "guided";
+    case OpenMPSchedulePolicy::Dynamic:
+    default:                            return "dynamic";
+    }
+}
+
+bool ValidateBinningConsistency(
+    int totalTiles,
+    const std::vector<size_t>& binCounts,
+    const std::vector<size_t>& binOffsets,
+    const std::vector<size_t>& binWriteCursor,
+    size_t totalBinRefs) {
+    if (totalTiles < 0) {
+        return false;
+    }
+    if (binCounts.size() != static_cast<size_t>(totalTiles)) {
+        return false;
+    }
+    if (binOffsets.size() != static_cast<size_t>(totalTiles) + 1) {
+        return false;
+    }
+    if (binWriteCursor.size() != static_cast<size_t>(totalTiles)) {
+        return false;
+    }
+    if (binOffsets.empty() || binOffsets.front() != 0 || binOffsets.back() != totalBinRefs) {
+        return false;
+    }
+    for (int t = 0; t < totalTiles; ++t) {
+        const size_t begin = binOffsets[static_cast<size_t>(t)];
+        const size_t end = binOffsets[static_cast<size_t>(t + 1)];
+        if (end < begin) {
+            return false;
+        }
+        if (end - begin != binCounts[static_cast<size_t>(t)]) {
+            return false;
+        }
+        if (binWriteCursor[static_cast<size_t>(t)] != end) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // ============================================================================
 // AVX2 SIMD 辅助函数（256 位宽，一次处理 4 个 double）
@@ -65,14 +114,21 @@ inline int GetInsideMask4(const __m256d& w0, const __m256d& w1, const __m256d& w
     return _mm256_movemask_pd(inside);
 }
 
-/// @brief 使用重心坐标对 Vec3 属性进行透视正确插值（除以 w 恢复线性空间）
+/// @brief 使用重心坐标对 Vec3 属性进行透视正确插值（AVX2+FMA）
 inline Vec3 InterpolateVec3(const Vec3& a0, const Vec3& a1, const Vec3& a2,
                             double bw0, double bw1, double bw2, double w) {
-    return Vec3{
-        (a0.x * bw0 + a1.x * bw1 + a2.x * bw2) * w,
-        (a0.y * bw0 + a1.y * bw1 + a2.y * bw2) * w,
-        (a0.z * bw0 + a1.z * bw1 + a2.z * bw2) * w
-    };
+    // 每个分量: (a0.c*bw0 + a1.c*bw1 + a2.c*bw2) * w
+    // 用 __m256d 一次处理 xyz（第 4 lane 为 0）
+    __m256d v0 = _mm256_set_pd(0.0, a0.z, a0.y, a0.x);
+    __m256d v1 = _mm256_set_pd(0.0, a1.z, a1.y, a1.x);
+    __m256d v2 = _mm256_set_pd(0.0, a2.z, a2.y, a2.x);
+    __m256d r = _mm256_mul_pd(v0, _mm256_set1_pd(bw0));
+    r = _mm256_fmadd_pd(v1, _mm256_set1_pd(bw1), r);
+    r = _mm256_fmadd_pd(v2, _mm256_set1_pd(bw2), r);
+    r = _mm256_mul_pd(r, _mm256_set1_pd(w));
+    alignas(32) double tmp[4];
+    _mm256_store_pd(tmp, r);
+    return Vec3{tmp[0], tmp[1], tmp[2]};
 }
 
 /// @brief 使用重心坐标对 Vec2 属性进行透视正确插值
@@ -84,15 +140,19 @@ inline Vec2 InterpolateVec2(const Vec2& a0, const Vec2& a1, const Vec2& a2,
     };
 }
 
-/// @brief 使用重心坐标对 Vec4 属性进行透视正确插值
+/// @brief 使用重心坐标对 Vec4 属性进行透视正确插值（AVX2+FMA）
 inline Vec4 InterpolateVec4(const Vec4& a0, const Vec4& a1, const Vec4& a2,
                             double bw0, double bw1, double bw2, double w) {
-    return Vec4{
-        (a0.x * bw0 + a1.x * bw1 + a2.x * bw2) * w,
-        (a0.y * bw0 + a1.y * bw1 + a2.y * bw2) * w,
-        (a0.z * bw0 + a1.z * bw1 + a2.z * bw2) * w,
-        (a0.w * bw0 + a1.w * bw1 + a2.w * bw2) * w
-    };
+    __m256d v0 = _mm256_loadu_pd(&a0.x);
+    __m256d v1 = _mm256_loadu_pd(&a1.x);
+    __m256d v2 = _mm256_loadu_pd(&a2.x);
+    __m256d r = _mm256_mul_pd(v0, _mm256_set1_pd(bw0));
+    r = _mm256_fmadd_pd(v1, _mm256_set1_pd(bw1), r);
+    r = _mm256_fmadd_pd(v2, _mm256_set1_pd(bw2), r);
+    r = _mm256_mul_pd(r, _mm256_set1_pd(w));
+    Vec4 out;
+    _mm256_storeu_pd(&out.x, r);
+    return out;
 }
 
 /**
@@ -144,10 +204,46 @@ struct RasterTriangle {
 };
 
 /**
+ * @brief 无初始化缓冲区（替代 std::vector，避免 resize 默认构造大量 POD 对象）
+ *
+ * 要求 T 为平凡可析构类型（不调用析构函数）。
+ * 跨帧复用分配：capacity 只增不减，后续帧仅更新 size 指针。
+ */
+template<typename T>
+struct UninitBuffer {
+    T* m_data = nullptr;
+    size_t m_size = 0;
+    size_t m_capacity = 0;
+
+    UninitBuffer() = default;
+    ~UninitBuffer() { std::free(m_data); }
+    UninitBuffer(const UninitBuffer&) = delete;
+    UninitBuffer& operator=(const UninitBuffer&) = delete;
+
+    /** @brief 设置逻辑大小，必要时扩容（不初始化新元素） */
+    void resize(size_t n) {
+        if (n > m_capacity) {
+            std::free(m_data);
+            m_capacity = n + n / 4; // 25% 余量，减少后续帧 realloc
+            m_data = static_cast<T*>(std::malloc(m_capacity * sizeof(T)));
+        }
+        m_size = n;
+    }
+
+    void clear() { m_size = 0; }
+    [[nodiscard]] size_t size() const { return m_size; }
+    [[nodiscard]] bool empty() const { return m_size == 0; }
+    T& operator[](size_t i) { return m_data[i]; }
+    const T& operator[](size_t i) const { return m_data[i]; }
+    T* data() { return m_data; }
+    const T* data() const { return m_data; }
+};
+
+/**
  * @brief 光栅化阶段复用的临时缓冲区（线程局部存储，避免重复堆分配）
  */
 struct RasterScratchBuffers {
-    std::vector<RasterTriangle> rasterTris;  ///< 裁剪后的光栅化三角形列表
+    UninitBuffer<RasterTriangle> rasterTris;  ///< 裁剪后的光栅化三角形列表（无初始化缓冲区）
 
     // Tile 坐标缓存（仅在分辨率变化时重建）
     std::vector<int> tileMinXs;
@@ -176,6 +272,11 @@ struct RasterScratchBuffers {
 
 /// 每线程独立的光栅化临时缓冲区（避免线程间竞争）
 thread_local RasterScratchBuffers g_rasterScratch;
+
+/// 持久化的每线程裁剪结果缓冲区（避免每帧 malloc/free 32 个大 vector）
+static constexpr int kMaxClipThreads = 64;
+static std::vector<RasterTriangle> g_perThreadClipTris[kMaxClipThreads];
+static uint64_t g_perThreadClipCount[kMaxClipThreads] = {};
 
 double SampleTextureChannel(const FrameContext& context, int imageIndex, int samplerIndex, const Vec2& uv, int channel) {
     if (!context.images || imageIndex < 0 || imageIndex >= static_cast<int>(context.images->size())) {
@@ -221,8 +322,15 @@ void Rasterizer::SetFrameContext(const FrameContext& context) {
  * @return 渲染统计信息
  */
 RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangles) {
+    return RasterizeTriangles(triangles.data(), triangles.size());
+}
+
+/**
+ * @brief 光栅化渲染入口（原始指针版本）
+ */
+RasterStats Rasterizer::RasterizeTriangles(const Triangle* triangles, size_t count) {
     RasterStats stats{};
-    if (!m_framebuffer || !m_depthBuffer) {
+    if (!m_framebuffer || !m_depthBuffer || count == 0) {
         return stats;
     }
 
@@ -230,12 +338,19 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
 
     int width = m_framebuffer->GetWidth();
     int height = m_framebuffer->GetHeight();
+    const OpenMPTuningOptions& ompCfg = m_frameContext.openmp;
+
+    using Clock = std::chrono::high_resolution_clock;
+    auto stageClipBegin = Clock::now();
+    double stageClipMs = 0.0;
+    double stageBinMs = 0.0;
+    double stageRasterMs = 0.0;
 
     // ── 阶段一：裁剪并准备光栅化三角形 ──────────────────────────────────
-    stats.trianglesInput = static_cast<uint64_t>(triangles.size());
+    stats.trianglesInput = static_cast<uint64_t>(count);
 
     RasterScratchBuffers& scratch = g_rasterScratch;
-    std::vector<RasterTriangle>& rasterTris = scratch.rasterTris;
+    UninitBuffer<RasterTriangle>& rasterTris = scratch.rasterTris;
     rasterTris.clear();
 
     auto toScreenX = [width](double x) {
@@ -246,21 +361,27 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     };
 
     // 并行裁剪：每线程独立 Clipper + 本地三角形列表，避免锁竞争
-    const int numInputTris = static_cast<int>(triangles.size());
+    const int numInputTris = static_cast<int>(count);
     const int maxClipThreads = omp_get_max_threads();
-    std::vector<std::vector<RasterTriangle>> perThreadClipTris(maxClipThreads);
-    std::vector<uint64_t> perThreadClipCount(maxClipThreads, 0);
 
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        auto& localTris = perThreadClipTris[tid];
+        auto& localTris = g_perThreadClipTris[tid];
         localTris.clear();
-        localTris.reserve(static_cast<size_t>(numInputTris / omp_get_num_threads()) * 2 + 16);
+        // reserve 只在首次不足时扩容，capacity 只增不减
+        const size_t needed = static_cast<size_t>(numInputTris / omp_get_num_threads()) * 2 + 16;
+        if (localTris.capacity() < needed) {
+            localTris.reserve(needed);
+        }
         uint64_t localClipped = 0;
         Clipper clipper;
 
-        #pragma omp for schedule(static)
+#if defined(SR_INTEL_OMP)
+        #pragma omp for schedule(guided)
+#else
+        #pragma omp for schedule(dynamic)
+#endif
         for (int triIdx = 0; triIdx < numInputTris; ++triIdx) {
             const auto& tri = triangles[static_cast<size_t>(triIdx)];
         // 背面剔除在透视除法后的屏幕空间中执行（见后续有向面积符号判断）
@@ -513,25 +634,31 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         }
     }
 
-        perThreadClipCount[tid] = localClipped;
+        g_perThreadClipCount[tid] = localClipped;
     } // end omp parallel (clipping)
 
-    // 合并各线程裁剪结果
+    // 并行合并各线程裁剪结果（prefix sum + 并行 memcpy）
     {
-        size_t totalRasterTris = 0;
+        std::vector<size_t> clipOffsets(static_cast<size_t>(maxClipThreads) + 1, 0);
         for (int t = 0; t < maxClipThreads; ++t) {
-            totalRasterTris += perThreadClipTris[t].size();
-            stats.trianglesClipped += perThreadClipCount[t];
+            stats.trianglesClipped += g_perThreadClipCount[t];
+            clipOffsets[static_cast<size_t>(t) + 1] = clipOffsets[static_cast<size_t>(t)] + g_perThreadClipTris[t].size();
         }
-        rasterTris.reserve(totalRasterTris);
-        for (auto& v : perThreadClipTris) {
-            rasterTris.insert(rasterTris.end(),
-                std::make_move_iterator(v.begin()),
-                std::make_move_iterator(v.end()));
+        const size_t totalRasterTris = clipOffsets[static_cast<size_t>(maxClipThreads)];
+        rasterTris.resize(totalRasterTris);
+
+        #pragma omp parallel for schedule(static, 1)
+        for (int t = 0; t < maxClipThreads; ++t) {
+            if (!g_perThreadClipTris[t].empty()) {
+                std::memcpy(&rasterTris[clipOffsets[static_cast<size_t>(t)]],
+                            g_perThreadClipTris[t].data(),
+                            g_perThreadClipTris[t].size() * sizeof(RasterTriangle));
+            }
         }
     }
 
     stats.trianglesRaster = static_cast<uint64_t>(rasterTris.size());
+    stageClipMs = std::chrono::duration<double, std::milli>(Clock::now() - stageClipBegin).count();
 
     {
         char buffer[256];
@@ -607,37 +734,93 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     triMaxTileY.resize(rasterTris.size());
 
     const int numRasterTris = static_cast<int>(rasterTris.size());
+    auto stageBinBegin = Clock::now();
 
     // Pass 1: 并行计算每个三角形的 tile 范围 + 每线程独立直方图统计
-    #pragma omp parallel
-    {
-        std::vector<size_t> localBinCounts(static_cast<size_t>(totalTiles), 0);
+    if (ompCfg.enableLegacyBinReduction) {
+        #pragma omp parallel
+        {
+            std::vector<size_t> localBinCounts(static_cast<size_t>(totalTiles), 0);
 
-        #pragma omp for schedule(static)
-        for (int i = 0; i < numRasterTris; ++i) {
-            const RasterTriangle& rt = rasterTris[static_cast<size_t>(i)];
-            int minTileX = std::max(rt.minX / TILE_SIZE, 0);
-            int maxTileX = std::min(rt.maxX / TILE_SIZE, tilesX - 1);
-            int minTileY = std::max(rt.minY / TILE_SIZE, 0);
-            int maxTileY = std::min(rt.maxY / TILE_SIZE, tilesY - 1);
-            triMinTileX[static_cast<size_t>(i)] = minTileX;
-            triMaxTileX[static_cast<size_t>(i)] = maxTileX;
-            triMinTileY[static_cast<size_t>(i)] = minTileY;
-            triMaxTileY[static_cast<size_t>(i)] = maxTileY;
-            for (int ty = minTileY; ty <= maxTileY; ++ty) {
-                const int rowBase = ty * tilesX;
-                for (int tx = minTileX; tx <= maxTileX; ++tx) {
-                    ++localBinCounts[static_cast<size_t>(rowBase + tx)];
+#if defined(SR_INTEL_OMP)
+            #pragma omp for schedule(guided)
+#else
+            #pragma omp for schedule(dynamic)
+#endif
+            for (int i = 0; i < numRasterTris; ++i) {
+                const RasterTriangle& rt = rasterTris[static_cast<size_t>(i)];
+                int minTileX = std::max(rt.minX / TILE_SIZE, 0);
+                int maxTileX = std::min(rt.maxX / TILE_SIZE, tilesX - 1);
+                int minTileY = std::max(rt.minY / TILE_SIZE, 0);
+                int maxTileY = std::min(rt.maxY / TILE_SIZE, tilesY - 1);
+                triMinTileX[static_cast<size_t>(i)] = minTileX;
+                triMaxTileX[static_cast<size_t>(i)] = maxTileX;
+                triMinTileY[static_cast<size_t>(i)] = minTileY;
+                triMaxTileY[static_cast<size_t>(i)] = maxTileY;
+                for (int ty = minTileY; ty <= maxTileY; ++ty) {
+                    const int rowBase = ty * tilesX;
+                    for (int tx = minTileX; tx <= maxTileX; ++tx) {
+                        ++localBinCounts[static_cast<size_t>(rowBase + tx)];
+                    }
+                }
+            }
+
+            // 旧路径：critical 归约（保留用于快速回滚）
+            #pragma omp critical
+            {
+                for (int t = 0; t < totalTiles; ++t) {
+                    binCounts[static_cast<size_t>(t)] += localBinCounts[static_cast<size_t>(t)];
+                }
+            }
+        }
+    } else {
+        const int maxThreads = std::max(1, omp_get_max_threads());
+        std::vector<std::vector<size_t>> perThreadBinCounts(
+            static_cast<size_t>(maxThreads),
+            std::vector<size_t>(static_cast<size_t>(totalTiles), 0));
+
+        #pragma omp parallel
+        {
+            const int tid = omp_get_thread_num();
+            std::vector<size_t>& localBinCounts = perThreadBinCounts[static_cast<size_t>(tid)];
+
+#if defined(SR_INTEL_OMP)
+            #pragma omp for schedule(guided)
+#else
+            #pragma omp for schedule(dynamic)
+#endif
+            for (int i = 0; i < numRasterTris; ++i) {
+                const RasterTriangle& rt = rasterTris[static_cast<size_t>(i)];
+                int minTileX = std::max(rt.minX / TILE_SIZE, 0);
+                int maxTileX = std::min(rt.maxX / TILE_SIZE, tilesX - 1);
+                int minTileY = std::max(rt.minY / TILE_SIZE, 0);
+                int maxTileY = std::min(rt.maxY / TILE_SIZE, tilesY - 1);
+                triMinTileX[static_cast<size_t>(i)] = minTileX;
+                triMaxTileX[static_cast<size_t>(i)] = maxTileX;
+                triMinTileY[static_cast<size_t>(i)] = minTileY;
+                triMaxTileY[static_cast<size_t>(i)] = maxTileY;
+                for (int ty = minTileY; ty <= maxTileY; ++ty) {
+                    const int rowBase = ty * tilesX;
+                    for (int tx = minTileX; tx <= maxTileX; ++tx) {
+                        ++localBinCounts[static_cast<size_t>(rowBase + tx)];
+                    }
                 }
             }
         }
 
-        // 归约：合并各线程直方图
-        #pragma omp critical
-        {
-            for (int t = 0; t < totalTiles; ++t) {
-                binCounts[static_cast<size_t>(t)] += localBinCounts[static_cast<size_t>(t)];
+        // 分块并行归约：按 Tile 维度并行求和，避免 critical 串行热点
+#if defined(SR_INTEL_OMP)
+        #pragma omp parallel for schedule(guided)
+#else
+        #pragma omp parallel for schedule(dynamic)
+#endif
+        for (int t = 0; t < totalTiles; ++t) {
+            size_t sum = 0;
+            const size_t tileIndex = static_cast<size_t>(t);
+            for (int tid = 0; tid < maxThreads; ++tid) {
+                sum += perThreadBinCounts[static_cast<size_t>(tid)][tileIndex];
             }
+            binCounts[tileIndex] = sum;
         }
     }
 
@@ -652,7 +835,7 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
     binWriteCursor.assign(binOffsets.begin(), binOffsets.begin() + static_cast<size_t>(totalTiles));
 
     // 第二遍：并行填充 Bin 索引（使用 C++20 atomic_ref 写游标，无锁）
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(guided, 1)
     for (int i = 0; i < numRasterTris; ++i) {
         const int minTileX = triMinTileX[static_cast<size_t>(i)];
         const int maxTileX = triMaxTileX[static_cast<size_t>(i)];
@@ -669,11 +852,15 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         }
     }
 
+    if (!ValidateBinningConsistency(totalTiles, binCounts, binOffsets, binWriteCursor, totalBinRefs)) {
+        SR_DEBUG_LOG("Rasterizer: binning consistency check failed\n");
+    }
+
     // 对每个 Tile 内的三角形排序：
     //   - 不透明/Mask：从近到远（Early-Z 优化，减少片元着色调用）
     //   - 半透明（Blend）：从远到近（保证 Alpha 混合正确性）
     const bool isBatchTransparent = !rasterTris.empty() && rasterTris[0].alphaMode == GLTFAlphaMode::Blend;
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(guided, 1)
     for (int t = 0; t < totalTiles; ++t) {
         const size_t begin = binOffsets[static_cast<size_t>(t)];
         const size_t end = binOffsets[static_cast<size_t>(t + 1)];
@@ -717,9 +904,12 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         SR_DEBUG_LOG(buffer);
     }
 
+    stageBinMs = std::chrono::duration<double, std::milli>(Clock::now() - stageBinBegin).count();
+
     SR_DEBUG_LOG("Rasterizer: tile max depth pass skipped\n");
 
     SR_DEBUG_LOG("Rasterizer: tile raster pass start\n");
+    auto stageRasterBegin = Clock::now();
 
     // 全帧预计算光照数据（仅一次，避免在每个三角形/像素重复计算 normalize 和 radiance）
     std::vector<PrecomputedLight> globalPrecomputedLights;
@@ -733,20 +923,34 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         }
     }
 
+    const size_t maxThreadCount = static_cast<size_t>(std::max(1, omp_get_max_threads()));
+    std::vector<double> threadRasterMs(maxThreadCount, 0.0);
+    std::vector<uint64_t> threadTileCounts(maxThreadCount, 0);
+    std::vector<uint64_t> threadPixelsTested(maxThreadCount, 0);
+    std::vector<uint64_t> threadPixelsShaded(maxThreadCount, 0);
+
     #pragma omp parallel
     {
         FragmentShader fragmentShader;
         uint64_t localPixelsTested = 0;
         uint64_t localPixelsShaded = 0;
+        uint64_t localTileCount = 0;
+        const int threadId = omp_get_thread_num();
+        const double threadBegin = ompCfg.enableProfiling ? omp_get_wtime() : 0.0;
 
         // 按 Tile 并行，每个 Tile 只由一个线程写入，天然无锁（无相邻像素冲突）
+#if defined(SR_INTEL_OMP)
+        #pragma omp for schedule(guided, 1)
+#else
         #pragma omp for schedule(dynamic, 1)
+#endif
         for (int t = 0; t < totalTiles; ++t) {
             const size_t binBegin = binOffsets[static_cast<size_t>(t)];
             const size_t binEnd = binOffsets[static_cast<size_t>(t + 1)];
             if (binBegin == binEnd) {
                 continue;
             }
+            localTileCount++;
 
             int tileMinX = tileMinXs[static_cast<size_t>(t)];
             int tileMinY = tileMinYs[static_cast<size_t>(t)];
@@ -1039,7 +1243,80 @@ RasterStats Rasterizer::RasterizeTriangles(const std::vector<Triangle>& triangle
         stats.pixelsTested += localPixelsTested;
         #pragma omp atomic
         stats.pixelsShaded += localPixelsShaded;
+
+        if (ompCfg.enableProfiling) {
+            const double threadEnd = omp_get_wtime();
+            threadRasterMs[static_cast<size_t>(threadId)] = (threadEnd - threadBegin) * 1000.0;
+            threadTileCounts[static_cast<size_t>(threadId)] = localTileCount;
+            threadPixelsTested[static_cast<size_t>(threadId)] = localPixelsTested;
+            threadPixelsShaded[static_cast<size_t>(threadId)] = localPixelsShaded;
+        }
     } // end omp parallel
+
+    stageRasterMs = std::chrono::duration<double, std::milli>(Clock::now() - stageRasterBegin).count();
+
+    // 渲染一致性自检：用于固定输入场景的基线对比（像素统计/深度流程不应退化）
+    uint64_t binChecksum = 1469598103934665603ull; // FNV-1a offset basis
+    for (size_t idx : binTriIndices) {
+        binChecksum ^= static_cast<uint64_t>(idx + 0x9e3779b97f4a7c15ull);
+        binChecksum *= 1099511628211ull;
+    }
+    const bool statCheckOk = stats.pixelsShaded <= stats.pixelsTested;
+    if (!statCheckOk) {
+        SR_DEBUG_LOG("Rasterizer: consistency self-check failed (pixelsShaded > pixelsTested)\n");
+    }
+
+    if (ompCfg.enableProfiling) {
+        double minThreadMs = std::numeric_limits<double>::max();
+        double maxThreadMs = 0.0;
+        double sumThreadMs = 0.0;
+        int slowestThread = 0;
+        for (size_t i = 0; i < threadRasterMs.size(); ++i) {
+            double tms = threadRasterMs[i];
+            if (tms < minThreadMs) minThreadMs = tms;
+            if (tms > maxThreadMs) { maxThreadMs = tms; slowestThread = static_cast<int>(i); }
+            sumThreadMs += tms;
+        }
+        if (threadRasterMs.empty()) {
+            minThreadMs = 0.0;
+        }
+        const double avgThreadMs = threadRasterMs.empty() ? 0.0 : (sumThreadMs / static_cast<double>(threadRasterMs.size()));
+        const double imbalancePct = (maxThreadMs > 1e-9) ? ((maxThreadMs - minThreadMs) / maxThreadMs * 100.0) : 0.0;
+
+        // 总览行
+        char stageBuffer[512];
+        std::snprintf(
+            stageBuffer, sizeof(stageBuffer),
+            "[SR-PERF] Rasterizer stages(ms): clip=%.3f bin=%.3f raster=%.3f threads=%d thread(min/max/avg)=%.3f/%.3f/%.3f imbalance=%.1f%% slowest=T%d totalTiles=%d\n",
+            stageClipMs,
+            stageBinMs,
+            stageRasterMs,
+            omp_get_max_threads(),
+            minThreadMs,
+            maxThreadMs,
+            avgThreadMs,
+            imbalancePct,
+            slowestThread,
+            totalTiles);
+        SR_PERF_LOG(stageBuffer);
+
+        // 每线程详细分布（每 8 个线程一行，避免输出过多）
+        const int nThreads = static_cast<int>(threadRasterMs.size());
+        for (int base = 0; base < nThreads; base += 8) {
+            char perThread[512];
+            int off = std::snprintf(perThread, sizeof(perThread), "[SR-PERF] T%02d-%02d:", base, std::min(base + 7, nThreads - 1));
+            for (int j = base; j < std::min(base + 8, nThreads); ++j) {
+                off += std::snprintf(perThread + off, sizeof(perThread) - static_cast<size_t>(off),
+                    " [%d: %.1fms %llutile %llupx]",
+                    j,
+                    threadRasterMs[static_cast<size_t>(j)],
+                    static_cast<unsigned long long>(threadTileCounts[static_cast<size_t>(j)]),
+                    static_cast<unsigned long long>(threadPixelsShaded[static_cast<size_t>(j)]));
+            }
+            off += std::snprintf(perThread + off, sizeof(perThread) - static_cast<size_t>(off), "\n");
+            SR_PERF_LOG(perThread);
+        }
+    }
 
     SR_DEBUG_LOG("Rasterizer: tile raster pass done\n");
 
