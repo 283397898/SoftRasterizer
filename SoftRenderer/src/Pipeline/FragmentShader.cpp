@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <immintrin.h>
 
 #include "Asset/GLTFTypes.h"
 #include "Pipeline/EnvironmentMap.h"
@@ -47,6 +48,46 @@ Vec3 Mul(const Vec3& a, double s) {
 
 Vec3 Div(const Vec3& a, double s) {
     return Vec3{a.x / s, a.y / s, a.z / s};
+}
+
+// ============================================================================
+// AVX2 SIMD 辅助函数 — Vec3 打包为 __m256d {r, g, b, 0}
+// 将 3 分量 Vec3 运算映射到 4 路 SIMD，第 4 lane 保持零值。
+// ============================================================================
+
+/// @brief 加载 Vec3 到 __m256d {x, y, z, 0}
+inline __m256d v3_load(const Vec3& v) {
+    return _mm256_set_pd(0.0, v.z, v.y, v.x);
+}
+
+/// @brief 从 __m256d 提取 Vec3（忽略第 4 分量）
+inline Vec3 v3_store(__m256d v) {
+    alignas(32) double tmp[4];
+    _mm256_store_pd(tmp, v);
+    return Vec3{tmp[0], tmp[1], tmp[2]};
+}
+
+/// @brief Vec3 点积（水平归约：xy 积 + z 积）
+inline double v3_dot(__m256d a, __m256d b) {
+    __m256d prod = _mm256_mul_pd(a, b);             // {ax*bx, ay*by, az*bz, 0}
+    __m128d lo = _mm256_castpd256_pd128(prod);      // {ax*bx, ay*by}
+    __m128d hi = _mm256_extractf128_pd(prod, 1);    // {az*bz, 0}
+    lo = _mm_add_pd(lo, hi);                         // {ax*bx+az*bz, ay*by}
+    __m128d shuf = _mm_unpackhi_pd(lo, lo);          // {ay*by, ay*by}
+    lo = _mm_add_sd(lo, shuf);                       // {sum, ...}
+    return _mm_cvtsd_f64(lo);
+}
+
+/// @brief Fresnel-Schlick 近似（SIMD 版，F0 为 __m256d）
+/// F = F0 + (1 - F0) * (1 - cosθ)^5
+inline __m256d FresnelSchlick_SIMD(double cosTheta, __m256d F0) {
+    double t = 1.0 - std::max(0.0, std::min(1.0, cosTheta));
+    double t2 = t * t;
+    double t5 = t2 * t2 * t;
+    __m256d t5_v = _mm256_set1_pd(t5);
+    __m256d one = _mm256_set1_pd(1.0);
+    // F0 + (1 - F0) * t5 = fmadd(1-F0, t5, F0)
+    return _mm256_fmadd_pd(_mm256_sub_pd(one, F0), t5_v, F0);
 }
 
 constexpr double kPi = 3.14159265358979323846;
@@ -251,173 +292,198 @@ Vec3 FragmentShader::ShadeFast(const FragmentContext& ctx, const FragmentVarying
         }
     }
 
-    // 根据折射率计算电介质 F0（菲涅耳垂直入射反射率）：F0 = ((ior-1)/(ior+1))^2
+    // ========================================================================
+    // PBR 计算阶段 — AVX2 SIMD 优化
+    // Vec3 运算全部使用 __m256d {r, g, b, 0}，在寄存器域内完成光照计算。
+    // 标量值（ndotl, GGX, Smith 等）保持 scalar double。
+    // ========================================================================
+    __m256d s_N = v3_load(N);
+    __m256d s_V = v3_load(V);
+    __m256d s_albedo = v3_load(albedo);
+    __m256d s_one = _mm256_set1_pd(1.0);
+
+    // 根据折射率计算电介质 F0：F0 = ((ior-1)/(ior+1))^2
     double iorF0 = (ctx.ior - 1.0) / (ctx.ior + 1.0);
     iorF0 = iorF0 * iorF0;
-    // 应用 KHR_materials_specular：镜面反射强度和颜色因子修正 F0
-    Vec3 dielectricF0{
-        iorF0 * ctx.specularFactor * ctx.specularColorFactor.x,
-        iorF0 * ctx.specularFactor * ctx.specularColorFactor.y,
-        iorF0 * ctx.specularFactor * ctx.specularColorFactor.z
-    };
-    Vec3 F0 = Lerp(dielectricF0, albedo, metallic);
+    // 应用 KHR_materials_specular 修正
+    __m256d s_dielectricF0 = _mm256_mul_pd(
+        v3_load(ctx.specularColorFactor),
+        _mm256_set1_pd(iorF0 * ctx.specularFactor));
+    // F0 = lerp(dielectricF0, albedo, metallic)
+    __m256d s_F0 = _mm256_fmadd_pd(
+        _mm256_sub_pd(s_albedo, s_dielectricF0),
+        _mm256_set1_pd(metallic), s_dielectricF0);
 
-    // BLEND 模式下对漫反射进行预乘 Alpha：镜面高光保持全强度（使玻璃仍有反射）
-    // 光栅化器使用预乘混合：result = shaded + bg*(1-alpha)
+    // BLEND 模式下预乘 Alpha
     double premulAlpha = (ctx.alphaMode == GLTFAlphaMode::Blend) ? Saturate(alpha) : 1.0;
+    __m256d s_premulAlpha = _mm256_set1_pd(premulAlpha);
 
-    double ndotv = std::max(0.0, Vec3::Dot(N, V));
+    double ndotv = std::max(0.0, v3_dot(s_N, s_V));
 
-    // 多重散射 GGX 能量补偿（Kulla-Conty），修正粗糙金属暗化问题
+    // 多重散射 GGX 能量补偿（Kulla-Conty 2017）
     Vec2 dfg = ApproxDFG(ndotv, roughness);
-    Vec3 Fms = MultiscatterCompensation(F0, dfg);
+    __m256d s_Ess = _mm256_max_pd(
+        _mm256_fmadd_pd(s_F0, _mm256_set1_pd(dfg.x), _mm256_set1_pd(dfg.y)),
+        _mm256_set1_pd(1e-4));
+    // Fms = 1 + F0 * (1/Ess - 1)
+    __m256d s_Fms = _mm256_fmadd_pd(s_F0,
+        _mm256_sub_pd(_mm256_div_pd(s_one, s_Ess), s_one),
+        s_one);
 
-    Vec3 Lo{0.0, 0.0, 0.0};
+    // 预计算 albedo / π（光照循环复用）
+    __m256d s_albedoOverPi = _mm256_mul_pd(s_albedo, _mm256_set1_pd(1.0 / kPi));
+    __m256d s_oneMinusMetallic = _mm256_set1_pd(1.0 - metallic);
+
+    __m256d s_Lo = _mm256_setzero_pd();
 
     // 使用预计算的光照数据（指针访问，避免 vector 拷贝开销）
     if (ctx.precomputedLights && ctx.precomputedLightCount > 0) {
         for (size_t i = 0; i < ctx.precomputedLightCount; ++i) {
             const PrecomputedLight& pl = ctx.precomputedLights[i];
-            const Vec3& L = pl.L;
+            __m256d s_L = v3_load(pl.L);
 
-            double ndotl = Vec3::Dot(N, L);
-
-            // 光源在背面时跳过（早期退出，减少无效着色）
+            double ndotl = v3_dot(s_N, s_L);
+            // 光源在背面时跳过（早期退出）
             if (ndotl <= 0.0) continue;
 
-            // 计算半角向量 H = normalize(L + V)，内联避免函数调用
-            Vec3 H{L.x + V.x, L.y + V.y, L.z + V.z};
-            double hLenSq = H.x * H.x + H.y * H.y + H.z * H.z;
+            // H = normalize(L + V)
+            __m256d s_H = _mm256_add_pd(s_L, s_V);
+            double hLenSq = v3_dot(s_H, s_H);
             if (hLenSq > 1e-12) {
-                double invHLen = 1.0 / std::sqrt(hLenSq);
-                H.x *= invHLen; H.y *= invHLen; H.z *= invHLen;
+                s_H = _mm256_mul_pd(s_H, _mm256_set1_pd(1.0 / std::sqrt(hLenSq)));
             }
 
-            double ndoth = std::max(0.0, Vec3::Dot(N, H));
-            double vdoth = std::max(0.0, Vec3::Dot(V, H));
+            double ndoth = std::max(0.0, v3_dot(s_N, s_H));
+            double vdoth = std::max(0.0, v3_dot(s_V, s_H));
 
-            Vec3 F = FresnelSchlick(vdoth, F0);
+            // Cook-Torrance BRDF（标量 D/G + SIMD F/specular/diffuse）
+            __m256d s_F = FresnelSchlick_SIMD(vdoth, s_F0);
             double D = DistributionGGX(ndoth, roughness);
             double G = GeometrySmith(ndotv, ndotl, roughness);
 
-            Vec3 numerator = Mul(F, D * G);
-            double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
+            // specular = F * (D*G / (4*ndotv*ndotl+eps)) * Fms
+            double specCoeff = (D * G) / (4.0 * ndotv * ndotl + 1e-12);
+            __m256d s_specular = _mm256_mul_pd(
+                _mm256_mul_pd(s_F, _mm256_set1_pd(specCoeff)), s_Fms);
 
-            Vec3 kS = F;
-            Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
-            Vec3 diffuse = Mul(kD, Div(albedo, kPi));
+            // kD = (1 - F) * (1 - metallic)
+            __m256d s_kD = _mm256_mul_pd(
+                _mm256_sub_pd(s_one, s_F), s_oneMinusMetallic);
+            // diffuse = kD * albedo / π
+            __m256d s_diffuse = _mm256_mul_pd(s_kD, s_albedoOverPi);
             if (premulAlpha < 1.0) {
-                diffuse = Mul(diffuse, premulAlpha);
+                s_diffuse = _mm256_mul_pd(s_diffuse, s_premulAlpha);
             }
 
-            Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
-            contrib = Mul(contrib, pl.radiance);  // 使用预计算辐照度
+            // contrib = (diffuse + specular) * ndotl * radiance
+            __m256d s_contrib = _mm256_mul_pd(
+                _mm256_add_pd(s_diffuse, s_specular), _mm256_set1_pd(ndotl));
+            s_contrib = _mm256_mul_pd(s_contrib, v3_load(pl.radiance));
 
-            Lo = Add(Lo, contrib);
+            s_Lo = _mm256_add_pd(s_Lo, s_contrib);
         }
     } else if (ctx.lights) {
         // 回退路径（向后兼容旧版光照数据）
         for (const DirectionalLight& light : *ctx.lights) {
             Vec3 L = Vec3{-light.direction.x, -light.direction.y, -light.direction.z}.Normalized();
-            Vec3 H = (L + V).Normalized();
+            __m256d s_L = v3_load(L);
+            __m256d s_H = v3_load((L + V).Normalized());
 
-            double ndotl = std::max(0.0, Vec3::Dot(N, L));
-            double ndoth = std::max(0.0, Vec3::Dot(N, H));
-            double vdoth = std::max(0.0, Vec3::Dot(V, H));
+            double ndotl = std::max(0.0, v3_dot(s_N, s_L));
+            double ndoth = std::max(0.0, v3_dot(s_N, s_H));
+            double vdoth = std::max(0.0, v3_dot(s_V, s_H));
 
-            Vec3 F = FresnelSchlick(vdoth, F0);
+            __m256d s_F = FresnelSchlick_SIMD(vdoth, s_F0);
             double D = DistributionGGX(ndoth, roughness);
             double G = GeometrySmith(ndotv, ndotl, roughness);
 
-            Vec3 numerator = Mul(F, D * G);
-            double denom = 4.0 * ndotv * ndotl + 1e-12;
-            Vec3 specular = Mul(Div(numerator, denom), Fms); // 多重散射补偿
+            double specCoeff = (D * G) / (4.0 * ndotv * ndotl + 1e-12);
+            __m256d s_specular = _mm256_mul_pd(
+                _mm256_mul_pd(s_F, _mm256_set1_pd(specCoeff)), s_Fms);
 
-            Vec3 kS = F;
-            Vec3 kD = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS), 1.0 - metallic);
-            Vec3 diffuse = Mul(kD, Div(albedo, kPi));
+            __m256d s_kD = _mm256_mul_pd(
+                _mm256_sub_pd(s_one, s_F), s_oneMinusMetallic);
+            __m256d s_diffuse = _mm256_mul_pd(s_kD, s_albedoOverPi);
             if (premulAlpha < 1.0) {
-                diffuse = Mul(diffuse, premulAlpha);
+                s_diffuse = _mm256_mul_pd(s_diffuse, s_premulAlpha);
             }
 
-            Vec3 radiance = Mul(light.color, light.intensity);
-            Vec3 contrib = Mul(Add(diffuse, specular), ndotl);
-            contrib = Mul(contrib, radiance);
+            __m256d s_radiance = _mm256_mul_pd(v3_load(light.color), _mm256_set1_pd(light.intensity));
+            __m256d s_contrib = _mm256_mul_pd(
+                _mm256_add_pd(s_diffuse, s_specular), _mm256_set1_pd(ndotl));
+            s_contrib = _mm256_mul_pd(s_contrib, s_radiance);
 
-            Lo = Add(Lo, contrib);
+            s_Lo = _mm256_add_pd(s_Lo, s_contrib);
         }
     }
 
-    // === Ambient: split into diffuse + specular ===
-    // 如果有环境贴图则使用 IBL (Image-Based Lighting)，否则回退到常量环境光
-    Vec3 kS_env = FresnelSchlick(ndotv, F0);
-    Vec3 kD_env = Mul(Sub(Vec3{1.0, 1.0, 1.0}, kS_env), 1.0 - metallic);
+    // === Ambient: split into diffuse + specular（AVX2 SIMD） ===
+    __m256d s_kS_env = FresnelSchlick_SIMD(ndotv, s_F0);
+    __m256d s_kD_env = _mm256_mul_pd(_mm256_sub_pd(s_one, s_kS_env), s_oneMinusMetallic);
 
-    Vec3 ambientDiffuse;
-    Vec3 ambientSpecular;
+    __m256d s_ambientDiffuse;
+    __m256d s_ambientSpecular;
 
     if (ctx.environmentMap) {
         // --- IBL 路径 (Split-Sum) ---
-        // 漫反射：SH 辐照度
-        Vec3 irradiance = ctx.environmentMap->EvalDiffuseSH(N);
-        ambientDiffuse = Mul(Mul(kD_env, albedo), Div(irradiance, kPi));
+        __m256d s_irradiance = v3_load(ctx.environmentMap->EvalDiffuseSH(N));
+        s_ambientDiffuse = _mm256_mul_pd(
+            _mm256_mul_pd(s_kD_env, s_albedo),
+            _mm256_mul_pd(s_irradiance, _mm256_set1_pd(1.0 / kPi)));
         if (premulAlpha < 1.0) {
-            ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
+            s_ambientDiffuse = _mm256_mul_pd(s_ambientDiffuse, s_premulAlpha);
         }
 
-        // 镜面反射：预过滤贴图 + BRDF LUT
-        Vec3 R{2.0 * ndotv * N.x - V.x, 2.0 * ndotv * N.y - V.y, 2.0 * ndotv * N.z - V.z};
-        double rLen = std::sqrt(R.x * R.x + R.y * R.y + R.z * R.z);
-        if (rLen > 1e-12) { double inv = 1.0 / rLen; R.x *= inv; R.y *= inv; R.z *= inv; }
-        Vec3 prefilteredColor = ctx.environmentMap->SampleSpecular(R, roughness);
+        // 反射方向 R = 2*ndotv*N - V
+        __m256d s_R = _mm256_fmsub_pd(_mm256_set1_pd(2.0 * ndotv), s_N, s_V);
+        double rLenSq = v3_dot(s_R, s_R);
+        if (rLenSq > 1e-12) {
+            s_R = _mm256_mul_pd(s_R, _mm256_set1_pd(1.0 / std::sqrt(rLenSq)));
+        }
+        Vec3 R = v3_store(s_R);
+        __m256d s_prefilteredColor = v3_load(ctx.environmentMap->SampleSpecular(R, roughness));
         Vec2 brdf = ctx.environmentMap->LookupBRDF(ndotv, roughness);
-        // 镜面环境光 = prefilteredColor * (F0 * scale + bias) * Fms（Split-Sum 第二项）
-        ambientSpecular = Vec3{
-            prefilteredColor.x * (F0.x * brdf.x + brdf.y) * Fms.x,
-            prefilteredColor.y * (F0.y * brdf.x + brdf.y) * Fms.y,
-            prefilteredColor.z * (F0.z * brdf.x + brdf.y) * Fms.z
-        };
+        // specEnv = prefilteredColor * (F0 * brdf.x + brdf.y) * Fms
+        __m256d s_brdfTerm = _mm256_fmadd_pd(s_F0, _mm256_set1_pd(brdf.x), _mm256_set1_pd(brdf.y));
+        s_ambientSpecular = _mm256_mul_pd(_mm256_mul_pd(s_prefilteredColor, s_brdfTerm), s_Fms);
     } else {
         // --- 回退：常量环境光 ---
-        ambientDiffuse = Mul(ctx.ambientColor, Mul(kD_env, albedo));
+        __m256d s_ambient = v3_load(ctx.ambientColor);
+        s_ambientDiffuse = _mm256_mul_pd(s_ambient, _mm256_mul_pd(s_kD_env, s_albedo));
         if (premulAlpha < 1.0) {
-            ambientDiffuse = Mul(ambientDiffuse, premulAlpha);
+            s_ambientDiffuse = _mm256_mul_pd(s_ambientDiffuse, s_premulAlpha);
         }
         double envSmooth = 1.0 - roughness * roughness;
-        ambientSpecular = Mul(Mul(kS_env, Fms), ctx.ambientColor * envSmooth);
+        s_ambientSpecular = _mm256_mul_pd(
+            _mm256_mul_pd(s_kS_env, s_Fms),
+            _mm256_mul_pd(s_ambient, _mm256_set1_pd(envSmooth)));
     }
-
-    Vec3 ambient = Add(ambientDiffuse, ambientSpecular);
 
     if (occlusionBinding.imageIndex >= 0) {
         Vec2 occUv = (occlusionBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor occ = SampleImageFast(ctx.images, ctx.samplers,
             occlusionBinding.imageIndex, occlusionBinding.samplerIndex, occUv, false);
-        // 仅对漫反射环境光应用 AO（镜面反射不受局部遮蔽影响）
-        ambientDiffuse = Mul(ambientDiffuse, occ.rgb.x);
-        ambient = Add(ambientDiffuse, ambientSpecular);
+        // 仅对漫反射环境光应用 AO
+        s_ambientDiffuse = _mm256_mul_pd(s_ambientDiffuse, _mm256_set1_pd(occ.rgb.x));
     }
 
-    Vec3 color = Add(ambient, Lo);
+    __m256d s_color = _mm256_add_pd(_mm256_add_pd(s_ambientDiffuse, s_ambientSpecular), s_Lo);
 
-    // 自发光：若有纹理则为 texture * emissiveFactor，否则直接使用 emissiveFactor
-    Vec3 emissiveContrib = ctx.emissiveFactor;
+    // 自发光
+    __m256d s_emissive = v3_load(ctx.emissiveFactor);
     if (emissiveBinding.imageIndex >= 0) {
         Vec2 emUv = (emissiveBinding.texCoordSet == 1) ? varying.texCoord1 : varying.texCoord;
         SampledColor emissive = SampleImageFast(ctx.images, ctx.samplers,
             emissiveBinding.imageIndex, emissiveBinding.samplerIndex, emUv, true);
-        emissiveContrib = Mul(emissive.rgb, ctx.emissiveFactor);
+        s_emissive = _mm256_mul_pd(v3_load(emissive.rgb), s_emissive);
     }
-    color = Add(color, emissiveContrib);
+    s_color = _mm256_add_pd(s_color, s_emissive);
 
-    // 输出 alpha 保持不变（Fresnel 反射已通过预乘镜面反射写入 shaded 颜色；
-    // 混合 alpha 维持原始材质透明度）。
     if (outEffectiveAlpha) {
         *outEffectiveAlpha = alpha;
     }
 
-    return color;
+    return v3_store(s_color);
 }
 
 } // namespace SR
