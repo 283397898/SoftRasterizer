@@ -18,7 +18,11 @@ void DepthBuffer::Resize(int width, int height) {
  */
 void DepthBuffer::Clear(double depthValue) {
     const int n = static_cast<int>(m_depth.size());
-    #pragma omp parallel for schedule(static)
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided, 4096)
+#else
+    #pragma omp parallel for schedule(dynamic, 4096)
+#endif
     for (int i = 0; i < n; ++i) {
         m_depth[static_cast<size_t>(i)] = depthValue;
     }

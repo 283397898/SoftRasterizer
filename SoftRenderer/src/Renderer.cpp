@@ -13,9 +13,57 @@
 #include "Utils/DebugLog.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
+#include <omp.h>
+
+#if defined(SR_INTEL_OMP) && defined(_WIN32)
+#include <windows.h>
+// CRT lib 段静态初始化：确保在 DLL 的任何 OpenMP 并行区（包括全局构造）之前设置 KMP 环境变量。
+// init_seg(lib) 在 C++ 全局构造之前执行，保证 libiomp5 首次 fork 时能读到正确的环境变量。
+#pragma init_seg(lib)
+static struct IntelOMPEarlyInit {
+    IntelOMPEarlyInit() {
+        // balanced 类型是 Intel OpenMP 为混合架构（P+E core）专门优化的亲和策略，
+        // 会自动检测核心拓扑并均匀分配线程到 P 核和 E 核。
+        _putenv_s("KMP_AFFINITY", "granularity=core,balanced");
+        // 不设置 KMP_HW_SUBSET —— 让运行时自动检测所有逻辑处理器。
+        // 在 i9-14900HX 等混合架构上，1t 限制可能导致 E 核线程不足。
+    }
+} s_intelOMPEarlyInit;
+#endif
 
 namespace SR {
+
+namespace {
+
+const char* ScheduleName(OpenMPSchedulePolicy policy) {
+    switch (policy) {
+    case OpenMPSchedulePolicy::Static:  return "static";
+    case OpenMPSchedulePolicy::Guided:  return "guided";
+    case OpenMPSchedulePolicy::Dynamic:
+    default:                            return "dynamic";
+    }
+}
+
+void LogOpenMPDiagnostics() {
+#if defined(_WIN32)
+    char buf[256];
+    int maxThreads = omp_get_max_threads();
+    int numProcs = omp_get_num_procs();
+    std::snprintf(buf, sizeof(buf),
+        "[SR] OpenMP: max_threads=%d num_procs=%d"
+#if defined(SR_INTEL_OMP)
+        " runtime=Intel(libiomp5) affinity=balanced"
+#else
+        " runtime=default"
+#endif
+        "\n", maxThreads, numProcs);
+    OutputDebugStringA(buf);
+#endif
+}
+
+} // namespace
 
 /**
  * @brief 清除帧缓冲与深度缓冲
@@ -53,8 +101,8 @@ PassContext Renderer::BuildPassContext(const FrameContext& frame) {
 /**
  * @brief 向调试输出输出帧性能统计信息
  *
- * 在 Debug 构建下通过 SR_DEBUG_LOG 输出，包含各阶段耗时和三角形/像素统计。
- * Release 构建下为空操作。
+ * 通过 SR_PERF_LOG 输出，Release/Debug 均可见（OutputDebugStringA）。
+ * 包含各阶段耗时、三角形/像素统计和 OMP 调度参数。
  */
 void Renderer::LogFrameStats(const RenderStats& stats, double clearMs, double setupMs, double totalMs, const char* label, size_t itemCount) const {
     char buffer[256];
@@ -79,7 +127,29 @@ void Renderer::LogFrameStats(const RenderStats& stats, double clearMs, double se
             static_cast<unsigned long long>(stats.pixelsTested),
             static_cast<unsigned long long>(stats.pixelsShaded));
     }
-    SR_DEBUG_LOG(buffer);
+    SR_PERF_LOG(buffer);
+
+    const char* clipSched = ScheduleName(m_config.openmp.clipSchedule);
+    const char* binSched = ScheduleName(m_config.openmp.binCountSchedule);
+    const char* clearSched = ScheduleName(m_config.openmp.clearSchedule);
+    const char* postSched = ScheduleName(m_config.openmp.postProcessSchedule);
+    const char* rasterSched = ScheduleName(m_config.openmp.rasterTileSchedule);
+    const char* buildSched = ScheduleName(m_config.openmp.drawItemBuildSchedule);
+
+    char ompBuffer[512];
+    std::snprintf(
+        ompBuffer, sizeof(ompBuffer),
+        "%s OMP: clip=%s,%d bin=%s,%d clear=%s,%d post=%s,%d build=%s,%d raster=%s,%d legacyBin=%d profiling=%d\n",
+        label,
+        clipSched, m_config.openmp.clipChunk,
+        binSched, m_config.openmp.binCountChunk,
+        clearSched, m_config.openmp.clearChunk,
+        postSched, m_config.openmp.postProcessChunk,
+        buildSched, m_config.openmp.drawItemBuildChunk,
+        rasterSched, m_config.openmp.rasterTileChunk,
+        m_config.openmp.enableLegacyBinReduction ? 1 : 0,
+        m_config.openmp.enableProfiling ? 1 : 0);
+    SR_PERF_LOG(ompBuffer);
 }
 
 /**
@@ -88,6 +158,7 @@ void Renderer::LogFrameStats(const RenderStats& stats, double clearMs, double se
  * @param height 画布高度
  */
 void Renderer::Initialize(int width, int height) {
+    LogOpenMPDiagnostics();
     m_width = width;
     m_height = height;
     m_framebuffer.Resize(width, height);
@@ -128,6 +199,7 @@ void Renderer::SetPostProcess(bool enableFXAA, bool enableToneMap, double exposu
  */
 void Renderer::SetConfig(const RendererConfig& config) {
     m_config = config;
+    m_config.Sanitize();
 }
 
 /**
@@ -156,6 +228,7 @@ void Renderer::Render(const Scene& scene) {
     FrameContextBuilder frameContextBuilder;
     FrameContext frameContext = frameContextBuilder.Build(scene, m_width, m_height, m_config.frameContext);
     frameContext.environmentMap = m_config.environmentMap;
+    frameContext.openmp = m_config.openmp;
     auto setupEnd = Clock::now();
 
     RenderQueue renderQueue;
@@ -195,6 +268,7 @@ void Renderer::Render(const GPUScene& scene) {
     frameContext.projection = Mat4::Perspective(options.fovYRadians, aspect, options.zNear, options.zFar);
     frameContext.ambientColor = options.ambientColor;
     frameContext.environmentMap = m_config.environmentMap;
+    frameContext.openmp = m_config.openmp;
     frameContext.images = &scene.GetImages();
     frameContext.samplers = &scene.GetSamplers();
     DirectionalLight defaultLight;
@@ -211,13 +285,24 @@ void Renderer::Render(const GPUScene& scene) {
 
     RenderPipeline pipeline;
     SR_DEBUG_LOG("GPUScene Render: before pipeline\n");
+    auto pipelineStart = Clock::now();
     RenderStats stats = pipeline.Render(renderQueue, passContext);
+    auto pipelineEnd = Clock::now();
     SR_DEBUG_LOG("GPUScene Render: after pipeline\n");
     auto frameEnd = Clock::now();
 
     double clearMs = std::chrono::duration<double, std::milli>(clearEnd - frameStart).count();
     double setupMs = std::chrono::duration<double, std::milli>(setupEnd - clearEnd).count();
+    double pipelineMs = std::chrono::duration<double, std::milli>(pipelineEnd - pipelineStart).count();
     double totalMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
+    double unmeasuredMs = totalMs - clearMs - setupMs;
+    double gapMs = unmeasuredMs - stats.buildMs - stats.rastMs;
+
+    char gapBuf[256];
+    std::snprintf(gapBuf, sizeof(gapBuf),
+        "[SR-PERF] Frame breakdown: pipeline=%.3fms measured(build+rast)=%.3fms gap=%.3fms (postproc+sky+clear2+other)\n",
+        pipelineMs, stats.buildMs + stats.rastMs, gapMs);
+    SR_PERF_LOG(gapBuf);
 
     LogFrameStats(stats, clearMs, setupMs, totalMs, "GPUScene", renderQueue.GetItems().size());
 }

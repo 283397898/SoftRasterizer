@@ -99,6 +99,10 @@ void CRenderView::Initialize(int width, int height) {
     m_renderer.Initialize(width, height);
     m_renderer.SetHDR(false);
 
+    RendererConfig perfConfig = m_renderer.GetConfig();
+    perfConfig.openmp.enableProfiling = true;
+    m_renderer.SetConfig(perfConfig);
+
     m_camera.SetTarget(Vec3{0.0, 0.0, 0.0});
     m_camera.SetDistance(2.5);
 

@@ -21,9 +21,12 @@ struct RendererConfig {
     bool useCameraPosOverride = false;    ///< 是否覆盖相机位置
     Vec3 cameraPosOverride{0.0, 0.0, 0.0}; ///< 覆盖用的相机位置
     const EnvironmentMap* environmentMap = nullptr; ///< IBL 环境贴图（可选）
+    OpenMPTuningOptions openmp{};         ///< OpenMP 并行调优配置（内部可用）
 
     /** @brief 获取默认配置 */
     static RendererConfig Default();
+    /** @brief 规范化配置边界（chunk >= 1） */
+    void Sanitize();
 };
 
 } // namespace SR

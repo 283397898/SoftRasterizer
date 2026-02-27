@@ -6,6 +6,7 @@
 #include "Pipeline/Rasterizer.h"
 #include "Utils/DebugLog.h"
 
+#include <chrono>
 #include <vector>
 
 namespace SR {
@@ -51,7 +52,23 @@ PassStats RenderPipeline::ExecutePass(RenderPass& pass, RenderContext& context) 
     snprintf(debugMsg, sizeof(debugMsg), "RenderPipeline: 执行 Pass '%s'\n", pass.GetName().c_str());
     SR_DEBUG_LOG(debugMsg);
 
-    return pass.Execute(context);
+    using Clock = std::chrono::high_resolution_clock;
+    auto passStart = Clock::now();
+    PassStats result = pass.Execute(context);
+    auto passEnd = Clock::now();
+    double passMs = std::chrono::duration<double, std::milli>(passEnd - passStart).count();
+
+    char perfMsg[256];
+    snprintf(perfMsg, sizeof(perfMsg),
+        "[SR-PERF] Pass '%s': %.3fms (build=%.3f rast=%.3f tri=%llu pxTest=%llu pxShade=%llu)\n",
+        pass.GetName().c_str(), passMs,
+        result.buildMs, result.rastMs,
+        static_cast<unsigned long long>(result.trianglesRendered),
+        static_cast<unsigned long long>(result.pixelsTested),
+        static_cast<unsigned long long>(result.pixelsShaded));
+    SR_PERF_LOG(perfMsg);
+
+    return result;
 }
 
 /**
@@ -61,13 +78,18 @@ PassStats RenderPipeline::ExecutePass(RenderPass& pass, RenderContext& context) 
  * 使用 DefaultPipeline::Create() 构建标准管线并执行。
  */
 RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& pass) const {
+    using Clock = std::chrono::high_resolution_clock;
+
     // 清除缓冲区（传统路径由管线自身负责清除）
+    auto clearStart = Clock::now();
     if (pass.framebuffer && pass.depthBuffer) {
         pass.framebuffer->ClearLinear(Vec3{0.0, 0.0, 0.0});
         pass.depthBuffer->Clear(1.0);
     }
+    auto clearEnd = Clock::now();
 
     // 创建帧级 MaterialTable（SOA 布局，生命周期覆盖整帧）
+    auto pipelineStart = Clock::now();
     MaterialTable materialTable;
     std::vector<Triangle> deferredBlend;  // OpaquePass 产出，TransparentPass 消费
 
@@ -80,6 +102,7 @@ RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& 
             post->SetExposure(pass.exposure);
         }
     }
+    auto pipelineEnd = Clock::now();
 
     RenderContext context{};
     context.framebuffer = pass.framebuffer;
@@ -88,7 +111,18 @@ RenderStats RenderPipeline::Render(const RenderQueue& queue, const PassContext& 
     context.frameContext = &pass.frame;
     context.deferredBlendTriangles = &deferredBlend;
     context.materialTable = &materialTable;
-    return ExecutePasses(passes, context);
+
+    RenderStats stats = ExecutePasses(passes, context);
+
+    double clearMs2 = std::chrono::duration<double, std::milli>(clearEnd - clearStart).count();
+    double pipeCreateMs = std::chrono::duration<double, std::milli>(pipelineEnd - pipelineStart).count();
+    char perfMsg[256];
+    snprintf(perfMsg, sizeof(perfMsg),
+        "[SR-PERF] Pipeline overhead: clear2=%.3fms pipeCreate=%.3fms\n",
+        clearMs2, pipeCreateMs);
+    SR_PERF_LOG(perfMsg);
+
+    return stats;
 }
 
 } // namespace SR

@@ -26,7 +26,11 @@ void Framebuffer::Clear(const Color& color) {
         | (static_cast<uint32_t>(color.a) << 24);
 
     const int n = static_cast<int>(m_pixels.size());
-    #pragma omp parallel for schedule(static)
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided, 4096)
+#else
+    #pragma omp parallel for schedule(dynamic, 4096)
+#endif
     for (int i = 0; i < n; ++i) {
         m_pixels[static_cast<size_t>(i)] = packed;
     }
@@ -36,7 +40,11 @@ void Framebuffer::Clear(const Color& color) {
  * @brief 并行清除线性线性 HDR 缓冲
  */
 void Framebuffer::ClearLinear(const Vec3& color) {
-    #pragma omp parallel for
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided, 4096)
+#else
+    #pragma omp parallel for schedule(dynamic, 4096)
+#endif
     for (int i = 0; i < static_cast<int>(m_linearPixels.size()); ++i) {
         m_linearPixels[static_cast<size_t>(i)] = color;
     }
@@ -97,7 +105,11 @@ void Framebuffer::ApplyFXAA() {
     const double edgeThresholdMin = 1.0 / 24.0;
     const double edgeThreshold = 1.0 / 12.0;
 
-    #pragma omp parallel for
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided, 1)
+#else
+    #pragma omp parallel for schedule(dynamic, 1)
+#endif
     for (int y = 0; y < m_height; ++y) {
         for (int x = 0; x < m_width; ++x) {
             const Vec3& cM = m_linearPixels[clampIndex(x, y)];
@@ -216,7 +228,11 @@ void Framebuffer::ResolveToSRGB(double exposure, bool dither) {
     // 预计算抖动模式（Bayer 矩阵偏移，减少量化带状噪声）
     static const double kDitherPattern[4] = {-0.375 / 255.0, -0.125 / 255.0, 0.125 / 255.0, 0.375 / 255.0};
 
-    #pragma omp parallel for schedule(static)
+#if defined(SR_INTEL_OMP)
+    #pragma omp parallel for schedule(guided, 1)
+#else
+    #pragma omp parallel for schedule(dynamic, 1)
+#endif
     for (int y = 0; y < m_height; ++y) {
         const int rowBase = y * m_width;
         const int yPattern = (y & 1) << 1;

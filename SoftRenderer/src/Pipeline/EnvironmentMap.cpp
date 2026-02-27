@@ -252,7 +252,7 @@ void EnvironmentMap::ComputeSH9() {
         const int tid = omp_get_thread_num();
         Vec3* localSH = &threadSH[static_cast<size_t>(tid) * 9];
 
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(guided, 1)
         for (int y = 0; y < h; ++y) {
             // 等距柱形投影：像素→方向映射（匹配 DirToEquirectUV 的逆）
             double v = (static_cast<double>(y) + 0.5) / h;
@@ -340,7 +340,7 @@ void EnvironmentMap::ComputePrefilteredSpecular() {
 
         if (roughness < 1e-6) {
             // Mip 0 (roughness≈0): 直接从原图降采样（完美反射）
-            #pragma omp parallel for schedule(static)
+            #pragma omp parallel for schedule(guided, 1)
             for (int y = 0; y < mipH; ++y) {
                 for (int x = 0; x < mipW; ++x) {
                     Vec3 dir = pixelToDir(x, y, mipW, mipH);
@@ -415,7 +415,7 @@ void EnvironmentMap::ComputeBRDFLUT() {
 
     m_brdfLUT.resize(static_cast<size_t>(size) * size * 2);
 
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(guided)
     for (int iy = 0; iy < size; ++iy) {
         double roughness = (static_cast<double>(iy) + 0.5) / size;
         roughness = std::max(roughness, 0.01); // 避免 roughness=0 导致的数值问题
