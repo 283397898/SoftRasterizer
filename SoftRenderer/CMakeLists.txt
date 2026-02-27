@@ -56,8 +56,16 @@ endif()
 if (MSVC)
     target_compile_options(SoftRenderer PRIVATE /utf-8)
     target_compile_options(SoftRenderer PRIVATE
-        $<$<CONFIG:Release>:/O2 /fp:fast /openmp /arch:AVX>
-        $<$<CONFIG:Debug>:/Od /Zi /openmp /arch:AVX>
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/fp:fast>
+        $<$<CONFIG:Release>:/arch:AVX>
+        $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:IntelLLVM>:/Qiopenmp>>
+        $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:IntelLLVM>>:/openmp>>
+        $<$<CONFIG:Debug>:/Od>
+        $<$<CONFIG:Debug>:/Zi>
+        $<$<CONFIG:Debug>:/arch:AVX>
+        $<$<CONFIG:Debug>:$<$<CXX_COMPILER_ID:IntelLLVM>:/Qiopenmp>>
+        $<$<CONFIG:Debug>:$<$<NOT:$<CXX_COMPILER_ID:IntelLLVM>>:/openmp>>
     )
 endif()
 

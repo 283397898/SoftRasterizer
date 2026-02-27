@@ -1,6 +1,5 @@
 # CMake
-build/
-build-dpcpp/
+build*/
 out/
 CMakeCache.txt
 CMakeFiles/

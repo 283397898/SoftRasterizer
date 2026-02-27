@@ -21,7 +21,7 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
 
 	add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
 	set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
-		INTERFACE_COMPILE_OPTIONS "/Qopenmp"
+		INTERFACE_COMPILE_OPTIONS "/Qiopenmp"
 	)
 	if (_vs_libomp)
 		set_property(TARGET OpenMP::OpenMP_CXX PROPERTY

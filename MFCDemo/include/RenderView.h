@@ -47,8 +47,6 @@ private:
     void Initialize(int width, int height);
     /** @brief 执行核心渲染流程 */
     void Render();
-    /** @brief 导出指定材质与全场景对比图 */
-    void ExportMaterialDebugFrames(const GLTFAsset& asset);
 
     int m_width = 0;              ///< 视口宽度
     int m_height = 0;             ///< 视口高度
@@ -66,8 +64,6 @@ private:
 
     bool m_useHDR = false;        ///< 是否启用 HDR 模式
     HDRPresenter m_hdrPresenter;   ///< D3D12 HDR 渲染辅助类
-    bool m_materialDebugExported = false; ///< 是否已经导出过材质调试图
-    std::string m_debugMaterialName = "MX5MI_Leather_Inst1"; ///< 需要隔离调试的材质名
 
     // FPS calculation
     LARGE_INTEGER m_timerFreq{};
